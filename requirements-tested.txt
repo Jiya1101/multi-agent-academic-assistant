@@ -1,0 +1,21 @@
+# The exact versions this project was developed and tested with
+# (Windows 11, Python 3.13.1, Ollama 0.34.4). Use these if a newer release of
+# a LangChain or Streamlit package ever breaks the app:
+#     pip install -r requirements-tested.txt
+streamlit==1.51.0
+langchain-core==1.5.6
+langchain-community==0.4.2
+langchain-text-splitters==1.1.2
+langchain-huggingface==1.2.2
+langchain-ollama==1.1.0
+faiss-cpu==1.15.0
+sentence-transformers==5.2.3
+transformers==5.2.0
+torch==2.9.0
+pypdf==6.16.1
+wordninja==2.0.0
+scikit-learn==1.7.2
+scipy==1.15.2
+numpy==2.2.3
+reportlab==5.0.0
+soundfile==0.13.1

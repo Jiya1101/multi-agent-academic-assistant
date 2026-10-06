@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Course material and everything generated from it stays on your machine:
+# the PDFs (not ours to publish), the search index built from them, and the
+# question log (student questions, quiz scores, Student IDs).
+data/*
+!data/.gitkeep
+db/*
+!db/.gitkeep
+
+# Editor / tool / OS files
+.claude/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets and logs
+.env
+.streamlit/secrets.toml
+*.log

@@ -1,0 +1,256 @@
+﻿# Design notes and measurements
+
+How the Academic Assistant works inside, what was measured, and where it falls short.
+For setup and everyday use, see the [README](../README.md); for a presentation script, see [DEMO.md](../DEMO.md).
+
+## The agents
+
+| Agent | Job | Tools |
+|---|---|---|
+| Doubt Resolver | Answer a question from the notes, with `[Chunk N]` citations | retrieval + relevance gate, Llama 3, question log |
+| Concept Explainer | Teach a concept step by step (beginner or detailed) | retrieval + relevance gate, Llama 3 |
+| Quiz Generator | Write multiple-choice questions strictly from the notes | retrieval, Llama 3 (JSON mode), quiz tables |
+| Note Generator | Write heading-wise study notes (definition, key points, use case) as a downloadable PDF | retrieval, Llama 3 (JSON mode), PDF export |
+| Progress Tracker | Per-student strong/weak topics from questions and quiz scores | question log, quiz attempts (no LLM) |
+| Faculty Insight | Cluster the whole class's questions; find topics the class keeps asking about | embeddings, clustering, question log |
+| Gap Handler | Queue a question the notes cannot answer for the professor; spot repeats | question log, embeddings |
+
+An **Orchestrator** routes each request (`agents/orchestrator.py`) and shows
+which agents ran, and how the message was routed, in an "Agents involved"
+panel.
+
+### The router learns
+
+Deciding which agent should handle a message is done by a **learned router**
+(`agents/routing.py`), not just keyword rules:
+
+- A classifier (logistic regression) is trained on labelled example messages
+  (`agents/router_data.py`). Its inputs are the message's sentence embedding
+  (its meaning) plus its words (TF-IDF), so "can you test my knowledge of
+  RDS" is recognised as a quiz request although no rule mentions it.
+- When the classifier is unsure (confidence under 40 percent), hand-written
+  rules take over. No LLM call is involved, so routing is instant.
+- **It keeps learning.** Under each answer, "Wrong kind of help?" lets a
+  student say what they wanted. The correction is stored and the classifier
+  is retrained on it at the next message.
+
+There are six routes: answer a question, explain, quiz, progress, study next,
+and make notes. Measured with `python evaluate_router.py --test` on 96
+held-out messages (never used for training or tuning):
+
+| Router | Accuracy |
+|---|---|
+| Hand-written rules | 52.1% |
+| Learned classifier | 96.9% |
+| Hybrid used by the app | 95.8% |
+
+Read these numbers with care. Both the training and test messages were
+written by the project authors, not collected from students, so they show
+how well the router handles new wording, not how it will do on real traffic.
+The test set is also weighted towards requests the rules were never written
+for; real students send mostly plain questions, which the rules already
+handle (about 95 percent on those). The rule for the notes route was written
+by the same authors who wrote the test phrasings, which flatters the rules on
+that route (86 percent there). Cross-validation on the training set gives
+about 90 percent for the learned router, so expect something between the two
+on unseen wording. The hybrid scored slightly below the learned classifier
+alone here, a one-message difference that is within noise; the rule fallback
+is kept as a safety net, not because the data shows it helps.
+
+### Study notes as a PDF
+
+The **Study notes** tab (students) and **Study Notes** tab (professors, for
+handouts) generate notes for up to five topics at a time. Pick topics from
+the slide titles in the uploaded files, or type your own, or just ask in chat:
+"make notes on ACID and BASE". Each topic becomes:
+
+- a **heading**, a short **definition**, **key points** as bullets, and a
+  **use case**, all in simple language;
+- a **source line** naming the file and pages it came from;
+- a **Download notes as PDF** button.
+
+Notes come only from the uploaded material. A topic the material does not
+cover is skipped and reported as a gap for the professor, not written from the
+model's own knowledge.
+
+Checks on what the model writes (it is a small local model and does drift):
+output must be valid JSON in the expected shape (one retry); key points that
+share too little wording with the source are dropped and counted; an example
+with no support in the source is replaced by "The notes do not give an
+example"; and any remaining statement containing two or more words that are
+absent from the source is marked with an asterisk and a "check this" legend,
+in the app and in the PDF. Sources are attributed from the text itself, since
+the model's own page citations were wrong in testing.
+
+What testing with real Llama 3 showed (two topics from `Module 4.pdf`): it took
+about 95 to 110 seconds per topic; the structure was right every time; and the
+first prompt let the model add details that are not in the slides ("such as
+financial transactions", "business intelligence"). Adding a rule against
+outside examples to the prompt removed those in the next run. We also tried a
+second Llama 3 pass to verify each statement against the source; on ten
+statements it caught two of three real additions but wrongly flagged two
+supported ones (about 50 percent precision), and added about a minute per
+topic, so it was not adopted. These are small samples; notes still need a
+read-through before they are relied on.
+
+### Voice input
+
+In the **Ask** tab, press the microphone button, speak, and press stop. The
+question is transcribed on your computer by OpenAI's Whisper
+(`whisper-small.en`, set in `rag_core/config.py`) and appears in the message
+box. Read it, fix any mistake, then press **Ask**; or tick **Ask right after
+transcribing** to skip that step. Nothing is uploaded: the recording stays on
+the machine. First use needs the one-time model download (`python
+download_speech_model.py`, about 970 MB), and the browser asks for microphone
+permission.
+
+Around the model there are some safeguards, because Whisper invents words
+(such as "Thank you.") when it is given silence or noise: recordings that are
+too short, too quiet, or noise-like (a spectral-flatness check) never reach
+the model, and a few phantom phrases are discarded. The model is also given a
+list of your course's acronyms, found from how the notes themselves write
+them (ACID, OLTP, RDS, YARN), so it writes "ACID" instead of "acid".
+
+Measured on 8 spoken test recordings (`rag_core/speech.py`, scored against
+what was said): about 3 percent word error, 2 to 3.5 seconds per short
+question and about 9 seconds for a 35-second recording on this CPU. Course
+acronyms came out in the correct form 16 of 16 times with the vocabulary hint,
+against 8 of 16 without it; the only wrong word was "red" for "read". Silence,
+a short click, quiet hiss and loud white noise were all rejected.
+
+Limits to state plainly: the test recordings were made with the two built-in
+Windows text-to-speech voices, which are much cleaner than a human voice on a
+laptop microphone, so real accuracy will be lower, especially with background
+noise or a strong accent. The thresholds for silence and noise were set on the
+same synthetic audio. The model is English only. The browser recording itself
+(microphone permission, device choice) could not be tested here; everything
+after the recording was.
+
+### Hand-offs between agents
+
+- **Doubt Resolver / Concept Explainer / Note Generator -> Gap Handler**: the
+  notes do not cover the question or topic. The professor sees it grouped
+  with similar ones.
+- **Progress Tracker -> Quiz Generator**: "quiz me" with no topic quizzes the
+  student's weakest topic.
+- **Progress Tracker -> Concept Explainer**: "what should I study next"
+  explains the weakest topic.
+- **Faculty Insight -> Quiz Generator** (professor): topics the notes cover
+  but many students keep asking about become published class quizzes. Quiz
+  results then show the professor which topics need re-teaching.
+- **Professor answer -> index**: a professor's answer to a gap is added to the
+  index, so every future student gets it, cited as a "Faculty answer".
+  Rebuilding the index re-adds these answers automatically.
+
+### Privacy
+
+A Student ID is optional. Without one, questions are logged with no
+identifier. With one, the Progress Tracker can remember that student's
+questions and quiz scores. Professors only see class-wide patterns:
+clustered questions, aggregated quiz results, and unanswered questions as
+text. There is no login yet; the Student/Professor switch is a demo toggle.
+
+## How it works
+
+1. **Extract** — `PyPDFLoader` pulls text out of each PDF, page by page.
+2. **Normalize** — `rag_core/normalize.py` cleans up common PDF-extraction
+   artifacts before chunking: stray bullet glyphs (`o`, `•`, ...), words
+   hyphenated across a line wrap, punctuation glued to the next word
+   (`categories:Relational`), case-boundary glued words (`isMySQL` ->
+   `is MySQL`), and long all-lowercase glued runs (`andrecords` ->
+   `and records`, via `wordninja`). It also tags each page with a
+   best-effort `section` title (its first substantial line) so chunks can
+   be cited by slide/section, not just page number. This is heuristic
+   cleanup, not perfect — see **Known limitations** below.
+3. **Chunk** — `RecursiveCharacterTextSplitter` splits the cleaned pages
+   into ~1000-character overlapping chunks along natural boundaries.
+4. **Embed** — each chunk is embedded with
+   `sentence-transformers/all-MiniLM-L6-v2` via `langchain-huggingface`.
+5. **Store** — embeddings are indexed in a local **FAISS** vector store and
+   persisted to `db/`.
+6. **Retrieve** — a user query is embedded and matched against the FAISS
+   index to fetch the top-k most similar chunks *with similarity scores*.
+7. **Relevance gate** — if even the closest chunk is below the similarity
+   threshold (`RELEVANCE_SCORE_THRESHOLD` in `config.py`), the question is
+   answered "not covered by the notes" **without calling the LLM at all**.
+   This is a deterministic backstop: small local models don't reliably
+   self-enforce "don't answer from outside the context" through prompt
+   instructions alone.
+8. **Generate** — otherwise, the retrieved chunks are inserted into a
+   strict-grounding, citation-enforcing prompt (chunk-tagged, negative-
+   constraint-aware, structured pedagogical format) sent to **Llama 3** via
+   **Ollama**, which produces the final answer.
+
+## Known limitations
+
+- **OCR is out of scope.** Scanned/image-based PDFs (no text layer) yield
+  zero chunks and are reported as such, not indexed.
+- **Text normalization is heuristic, not perfect.** On messy source PDFs
+  (e.g. slide decks exported with no real spacing) you may still see
+  occasional artifacts: a genuine long word incorrectly split ("recover
+  ability"), a short glued word left untouched ("byusing"), or a word
+  broken by a stray mid-word line break the extractor introduced with no
+  hyphen to detect ("well-architect ed"). These are documented trade-offs
+  in `rag_core/normalize.py`, not silent failures.
+- **Answer quality depends heavily on the LLM.** Small models (tried during
+  development: `qwen2.5:0.5b`) ground their retrieval correctly but don't
+  reliably follow every prompt instruction (like inline `[Chunk N]`
+  citations, or the negative-constraint "say so if it's not covered"
+  rule — which is why the relevance gate above exists as a deterministic
+  backstop instead of relying on the prompt alone). `llama3` follows
+  instructions noticeably better; swap `OLLAMA_MODEL` in `config.py` to try
+  a different local model.
+
+- **The relevance gate is a heuristic.** A retrieval distance cutoff
+  (`RELEVANCE_SCORE_THRESHOLD`) decides whether the notes cover a question,
+  tuned on 37 questions from two documents. Very short queries embed poorly
+  ("ACID" alone scores just over the cutoff), so a keyword rescue accepts a
+  short query when every content word literally appears together in a
+  chunk and the words are distinctive. Re-check both on different notes.
+- **Quiz questions come from a small local model.** Output is validated
+  (4 distinct options, one correct answer, a real source chunk) and every
+  question names the slide it came from, but a question can still be
+  poorly worded, have a weak distractor, or occasionally have two defensible
+  correct answers (seen in testing with real Llama 3). Professors can review
+  each question on the Class Quizzes tab. Generation takes about 2 to 3
+  minutes per quiz on CPU; `publish_quizzes.py` does it ahead of time.
+- **Topics are slide titles.** A "topic" is the title of the slide a
+  question or quiz maps to, taken from the page's first line. When a slide's
+  body starts with an acronym, it can be glued onto the title.
+- **The router learns from small, self-written data.** About 220 training
+  messages written by the authors, plus any student corrections. It can
+  still misroute unusual wording (the ambiguous line between "explain X" as a
+  plain question and "explain X simply" is a convention we chose). Wrongly
+  routed messages can be corrected in the app, and the agents themselves do
+  not plan or negotiate: it is an orchestrated pipeline, not autonomous
+  agents.
+- **No authentication.** The Student ID is self-declared, so anyone can type
+  another student's ID.
+
+## Running the tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The suite uses a small synthetic index and a fake chat model, so it runs in
+seconds without Ollama or any PDFs.
+
+## Using `rag_core` directly
+
+All retrieval logic lives in `rag_core/` behind a small function API:
+
+```python
+from rag_core import load_vectorstore, answer_question
+
+vectorstore = load_vectorstore()
+result = answer_question("Explain gradient descent", vectorstore)
+
+result.grounded            # False if the relevance gate short-circuited the LLM call
+result.answer               # answer string (or the fixed "not covered" message)
+result.source_documents     # the chunks used to produce it (empty if not grounded)
+```
+
+New agents should import from `rag_core` rather than re-implementing
+loading, chunking, embedding, or FAISS access, and subclass `agents.base.Agent`
+so the Orchestrator can run them.
