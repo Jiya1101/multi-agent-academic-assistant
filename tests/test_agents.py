@@ -13,19 +13,24 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import numpy as np
+import soundfile as sf
 from langchain_core.documents import Document
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
-from agents import AgentContext, Orchestrator, RuleRouter, route_message
+from agents import AgentContext, OralAssessor, Orchestrator, RuleRouter, route_message
 from agents.progress_tracker import ProgressTracker
 from agents.quiz_generator import grade_answers
 from agents.quiz_generator import parse_quiz_json, shuffle_options
+from rag_core.audio_metrics import SAMPLE_RATE
 from rag_core.embeddings import get_embeddings
 from rag_core.learning_log import SCOPE_CLASS, SCOPE_PERSONAL, create_quiz, get_quiz, list_quizzes, record_attempt
+from rag_core.oral_assessment import list_oral_assessments
 from rag_core.query_log import list_queries
 from rag_core.vectorstore import build_vectorstore
 
@@ -64,6 +69,14 @@ class CountingFake(FakeListChatModel):
 
 def fake(*responses: str) -> CountingFake:
     return CountingFake(responses=list(responses))
+
+
+def wav_bytes(seconds: float = 1.0) -> bytes:
+    t = np.arange(int(seconds * SAMPLE_RATE)) / SAMPLE_RATE
+    audio = (0.25 * np.sin(2 * np.pi * 220 * t)).astype("float32")
+    buffer = BytesIO()
+    sf.write(buffer, audio, SAMPLE_RATE, format="WAV", subtype="PCM_16")
+    return buffer.getvalue()
 
 
 class AgentTestCase(unittest.TestCase):
@@ -196,7 +209,12 @@ class QuizParsingTests(unittest.TestCase):
                 self.assertEqual(self.parse(item), [])
 
     def test_keeps_good_drops_bad_in_same_batch(self):
-        self.assertEqual(len(self.parse(self.good(), self.good(answer_index=9), self.good())), 2)
+        self.assertEqual(
+            len(self.parse(self.good(), self.good(answer_index=9), self.good(question="Another question?"))), 2
+        )
+
+    def test_drops_a_repeated_question(self):
+        self.assertEqual(len(self.parse(self.good(), self.good())), 1)
 
     def test_shuffle_keeps_correct_answer(self):
         question = self.good(options=["right", "w1", "w2", "w3"], answer_index=0)
@@ -248,6 +266,36 @@ class ExplainerTests(AgentTestCase):
         self.assertEqual(result.primary.kind, "explanation")
         self.assertEqual(result.primary.data["level"], "beginner")
         self.assertEqual(len(list_queries(db_dir=self.db)), 1)
+
+
+class OralAssessorTests(AgentTestCase):
+    def test_generates_scores_and_saves_oral_assessment(self):
+        assessor = OralAssessor()
+        question = assessor.generate_question(
+            "ACID",
+            self.ctx(question_llm := fake(json.dumps({"question": "Explain ACID in your own words."}))),
+        )
+        self.assertEqual(question.kind, "oral_question")
+        self.assertEqual(question.text, "Explain ACID in your own words.")
+        self.assertEqual(question_llm.calls, 1)
+
+        score_llm = fake(json.dumps({"content_score": 0.9, "feedback": "Covers the four ACID properties."}))
+        result = assessor.assess_response(
+            "ACID",
+            question.text,
+            "ACID means atomicity consistency isolation and durability",
+            wav_bytes(2.0),
+            self.ctx(student_id="s1"),
+            context=question.data["context"],
+            score_llm=score_llm,
+        )
+
+        self.assertEqual(result.kind, "oral_assessment")
+        self.assertEqual(result.data["understanding_level"], "Strong understanding")
+        self.assertEqual(result.data["content_score"], 0.9)
+        rows = list_oral_assessments(student_id="s1", db_dir=self.db)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].topic, "ACID")
 
 
 class QuizGeneratorTests(AgentTestCase):

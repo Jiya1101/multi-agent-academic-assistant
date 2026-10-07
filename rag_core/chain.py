@@ -19,6 +19,7 @@ from langchain_core.output_parsers import StrOutputParser
 
 from rag_core.config import TOP_K, RELEVANCE_SCORE_THRESHOLD
 from rag_core.llm import get_llm
+from rag_core.normalize import chunk_sentences
 
 _NOT_COVERED_MESSAGE = (
     "The provided notes do not contain information relevant to this question. "
@@ -49,10 +50,11 @@ sub-topics.
    - Never attribute a property of a broader topic to a specific subject unless the text \
 explicitly links them.
 
-3. Pedagogical Structure:
-   - Begin with a concise, direct definition (1-2 sentences).
-   - Use structured bullet points for key components, architecture, features, or use cases.
-   - Highlight practical implications, trade-offs, or comparisons mentioned in the material.
+3. Pedagogical Structure (keep it concise):
+   - Begin with a direct answer or definition in 1-2 sentences.
+   - Then give at most 5 short bullet points ("- ...") for the key components, features, or \
+use cases. One idea per bullet; no long paragraphs.
+   - Mention trade-offs or comparisons only if the material states them.
 
 4. Source Transparency:
    - Cite the relevant chunk for each key point, e.g. [Chunk 2].
@@ -69,6 +71,116 @@ _PROMPT = ChatPromptTemplate.from_messages(
         ("human", "--- STUDENT QUESTION ---\n{question}\n\n--- ACADEMIC EXPLANATION ---"),
     ]
 )
+
+
+_TYPES_QUESTION = re.compile(
+    r"\b(?:types|kinds|categories|classes)\s+of\s+(?P<x>[A-Za-z][A-Za-z\- ]{1,30}?)\s*(?:\?|$|,|\band\b|\bin\b)", re.I
+)
+_DEFINITION_SENTENCE = re.compile(
+    r"^(?:An?\s+|The\s+)?(?P<term>[A-Z][A-Za-z0-9&/\-]*(?: [A-Za-z0-9&/\-]+){0,3}?) (?:is|are|refers to|means) (?P<rest>.{20,})$"
+)
+
+
+def type_definitions(
+    question: str, vectorstore: FAISS, source_filenames: Optional[Iterable[str]] = None
+) -> List[tuple]:
+    """
+    For "what are the types of X?" return every (name, description) the material defines for an X.
+
+    The list of types is usually spread over several slides ("A Perception Medium refers to ...",
+    "A Storage Medium is ..."), so top-k retrieval alone returns only some of them. Returns [] when the
+    question is not about types or fewer than three are found.
+    """
+    match = _TYPES_QUESTION.search(question or "")
+    if not match:
+        return []
+    head = match.group("x").split()[-1].lower()
+    heads = {head, head.rstrip("s"), "medium" if head == "media" else head}
+    selected = set(source_filenames) if source_filenames is not None else None
+    docs = [
+        d for d in vectorstore.docstore._dict.values()
+        if selected is None or Path(d.metadata.get("source", "")).name in selected
+    ]
+    docs.sort(key=lambda d: (Path(d.metadata.get("source", "")).name, d.metadata.get("page") or 0))
+    found: dict = {}
+    for doc in docs:
+        for sentence in chunk_sentences(doc, max_len=300):
+            m = _DEFINITION_SENTENCE.match(sentence)
+            if not m:
+                continue
+            term, key = m.group("term"), m.group("term").lower()
+            if key not in heads and any(key.endswith(" " + h) for h in heads):
+                found.setdefault(key, (term, m.group("rest").rstrip(".")))
+    return list(found.values()) if len(found) >= 3 else []
+
+
+def format_type_definitions(types: List[tuple]) -> List[str]:
+    return [f"- **{term}**: {rest[:1].upper() + rest[1:]}." for term, rest in types]
+
+
+_QUESTION_WORD = r"(?:what|how|why|which|who|when|where|explain|define|describe|list|name)"
+_LIST_NOUN = (r"(?:types|kinds|categories|parts|components|elements|steps|features|advantages|disadvantages|"
+              r"examples|uses|applications|properties|characteristics|layers|stages|benefits)")
+
+
+def split_question(question: str) -> List[str]:
+    """Break "What is X and what are the types of Y?" (or "... and the six types of Y?") into separate questions."""
+    text = (question or "").strip()
+    parts = re.split(
+        rf"(?<=\?)\s+|\s+(?:and|also|&)\s+(?=(?:{_QUESTION_WORD}\b|(?:the\s+)?(?:\w+\s+)?{_LIST_NOUN}\s+of\b))",
+        text, flags=re.I,
+    )
+    parts = [p.strip(" ,.?") for p in parts if len(p.split()) >= 3]
+    if len(parts) < 2 or not re.match(rf"{_QUESTION_WORD}\b", parts[0], re.I):
+        return [question]
+    ask = text.endswith("?")
+    out = []
+    for i, part in enumerate(parts):
+        if i and not re.match(rf"{_QUESTION_WORD}\b", part, re.I):
+            part = ("What are " if re.match(rf"(?:the\s+)?(?:\w+\s+)?{_LIST_NOUN}\b", part, re.I) else "What is ") + part
+        out.append(part[:1].upper() + part[1:] + ("?" if ask else ""))
+    return out
+
+
+def _extractive_answer(question: str, chunks: List[Document], types: Optional[List[tuple]] = None) -> str:
+    """Concise fallback answer from retrieved text when the local LLM is offline."""
+    if types:
+        return (
+            "I found this in your uploaded material. The local LLM is unavailable, so this is an "
+            "extractive answer from the most relevant chunks:\n\n"
+            f"The material describes {len(types)} types:\n" + "\n".join(format_type_definitions(types))
+        )
+    terms = _content_terms(question)
+    sentences = []
+    for i, doc in enumerate(chunks, start=1):
+        for sentence in chunk_sentences(doc, max_len=260):
+            lower = sentence.lower()
+            score = sum(1 for term in terms if term in lower)
+            if score or not terms:
+                sentences.append((score, i, sentence))
+    if not sentences:
+        # Nothing reads as a sentence (a table, say): show the start of the best chunk, cut on a word.
+        for i, doc in enumerate(chunks[:2], start=1):
+            text = " ".join(doc.page_content.split())
+            if len(text) > 260:
+                text = text[:260].rsplit(" ", 1)[0]
+            sentences.append((0, i, text.rstrip(" ,;:—-") + "."))
+    sentences.sort(key=lambda item: (-item[0], item[1]))
+    bullets = []
+    seen = set()
+    for _, chunk_index, sentence in sentences:
+        key = sentence.lower()[:120]
+        if key in seen:
+            continue
+        seen.add(key)
+        bullets.append(f"- {sentence} [Chunk {chunk_index}]")
+        if len(bullets) == 4:
+            break
+    return (
+        "I found this in your uploaded material. The local LLM is unavailable, so this is an "
+        "extractive answer from the most relevant chunks:\n\n"
+        + "\n".join(bullets)
+    )
 
 
 @dataclass
@@ -211,7 +323,7 @@ def retrieve(
     return Retrieval(chunks=[doc for doc, _ in scored], top_score=top_score, relevant=True)
 
 
-def answer_question(
+def _answer_one(
     question: str,
     vectorstore: FAISS,
     k: int = TOP_K,
@@ -230,13 +342,48 @@ def answer_question(
             top_score=retrieval.top_score,
         )
 
-    context = format_context(retrieval.chunks)
+    types = type_definitions(question, vectorstore, source_filenames)
+    chunks = list(retrieval.chunks)
+    if types:  # give the model the complete list, not just the slides that ranked highest
+        chunks.append(Document(
+            page_content="Types listed in the material: " + " ".join(f"{t}: {r}." for t, r in types),
+            metadata={"source": "types list", "page": 0},
+        ))
+    context = format_context(chunks)
     chain = _PROMPT | (llm if llm is not None else get_llm()) | StrOutputParser()
-    answer = chain.invoke({"context": context, "question": question})
+    try:
+        answer = chain.invoke({"context": context, "question": question})
+    except Exception:
+        answer = _extractive_answer(question, retrieval.chunks, types)
 
     return RagResult(
         question=question,
         answer=answer,
         source_documents=retrieval.chunks,
         top_score=retrieval.top_score,
+    )
+
+
+def answer_question(
+    question: str,
+    vectorstore: FAISS,
+    k: int = TOP_K,
+    score_threshold: float = RELEVANCE_SCORE_THRESHOLD,
+    source_filenames: Optional[Iterable[str]] = None,
+    llm=None,
+) -> RagResult:
+    """Answer a question; a message that asks several things is answered part by part."""
+    parts = split_question(question)
+    if len(parts) == 1:
+        return _answer_one(question, vectorstore, k, score_threshold, source_filenames, llm)
+
+    results = [_answer_one(part, vectorstore, k, score_threshold, source_filenames, llm) for part in parts]
+    sections = [f"**{part}**\n{result.answer.strip()}" for part, result in zip(parts, results)]
+    scores = [r.top_score for r in results if r.top_score is not None]
+    return RagResult(
+        question=question,
+        answer="\n\n".join(sections),
+        source_documents=[d for r in results for d in r.source_documents],
+        grounded=any(r.grounded for r in results),
+        top_score=min(scores) if scores else None,
     )

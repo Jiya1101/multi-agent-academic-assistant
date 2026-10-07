@@ -23,6 +23,7 @@ from agents.doubt_resolver import DoubtResolver
 from agents.faculty_insight import FacultyInsight
 from agents.gap_handler import GapHandler
 from agents.note_generator import NoteGenerator
+from agents.oral_assessor import OralAssessor
 from agents.progress_tracker import ProgressTracker
 from agents.quiz_generator import QuizGenerator
 from agents.routing import Route, default_router, route_message
@@ -51,6 +52,7 @@ class Orchestrator:
         self.concept_explainer = ConceptExplainer()
         self.quiz_generator = QuizGenerator()
         self.note_generator = NoteGenerator()
+        self.oral_assessor = OralAssessor()
         self.progress_tracker = ProgressTracker()
         self.faculty_insight = FacultyInsight()
         self.gap_handler = GapHandler()

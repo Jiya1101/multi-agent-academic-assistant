@@ -12,6 +12,7 @@ from agents.doubt_resolver import DoubtResolver
 from agents.faculty_insight import ConfusionTopic, FacultyInsight
 from agents.gap_handler import GapHandler
 from agents.orchestrator import Orchestrator, OrchestratorResult
+from agents.oral_assessor import OralAssessor
 from agents.routing import HybridRouter, LearnedRouter, Route, RuleRouter, route_message
 from agents.note_generator import NoteGenerator
 from agents.progress_tracker import ProgressTracker, TopicProgress
@@ -21,6 +22,7 @@ __all__ = [
     "Agent", "AgentContext", "AgentResult",
     "ConceptExplainer", "DoubtResolver", "FacultyInsight", "ConfusionTopic",
     "GapHandler", "ProgressTracker", "TopicProgress", "QuizGenerator", "grade_answers", "NoteGenerator",
+    "OralAssessor",
     "Orchestrator", "OrchestratorResult", "Route", "route_message",
     "HybridRouter", "LearnedRouter", "RuleRouter",
 ]

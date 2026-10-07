@@ -98,6 +98,7 @@ def short_section_title(section: str, max_len: int = 48) -> str:
     it easy..."). If it opens with a run of ALL-CAPS words, that run is the
     slide title; otherwise trim to `max_len` at a word boundary.
     """
+    section = human_title(section)
     run = []
     for word in section.split():
         if word.isupper() or word.isdigit():
@@ -111,21 +112,193 @@ def short_section_title(section: str, max_len: int = 48) -> str:
     return section[:max_len].rsplit(" ", 1)[0] + "..."
 
 
-def extract_section_title(raw_page_text: str) -> str | None:
-    """
-    Return the first substantial line of a page, used as a "section" tag.
+def _split_compact(word: str) -> str:
+    """'MULTIMEDIASYSTEMS' -> 'Multimedia Systems' (falls back to plain title case)."""
+    parts = wordninja.split(word.lower())
+    if len(parts) > 1 and all(len(p) >= 3 for p in parts):
+        return " ".join(p.capitalize() for p in parts)
+    return word.capitalize()
 
-    PyPDFLoader returns one Document per PDF page; for slide-style course
-    notes that page's first line is almost always the slide title, which
-    makes a good citation/attribution tag even without a real markdown
-    structure to split on. Must run on the raw (pre-normalization) text so
-    line boundaries are still intact.
+
+def human_title(text: str) -> str:
+    """Clean PDF-looking headings for student-facing display."""
+    text = re.sub(r"\s+", " ", text or "").strip()
+    # "M U L T I M E D I A S Y S T E M S" or "M U L T I M E D I A S Y S T E M S Introduction"
+    spaced = re.match(r"^((?:[A-Z]\s+){3,}[A-Z])\b\s*(.*)$", text)
+    if spaced:
+        compact = _split_compact(spaced.group(1).replace(" ", ""))
+        rest = spaced.group(2).strip()
+        text = f"{compact} {rest}".strip()
+    text = re.sub(r"\bSilberschatz,\s*Galvin and Gagne\s*©?\d{4}\b", "", text, flags=re.I)
+    text = re.sub(r"\bOperating System Concepts\s*[-–]\s*10th Edition\b", "", text, flags=re.I)
+    text = re.sub(r"\bChapter\s+\d+[:\s-]*", "", text, flags=re.I)
+    text = re.sub(r"^\d+(?:\.\d+)*\s*", "", text).strip(" -–:|.•·")
+    text = re.sub(r"^\(\w{1,2}\)\s*", "", text)  # "(b) Communication" -> "Communication"
+    text = re.sub(r"\s+", " ", text).strip()
+    if re.fullmatch(r"[A-Z]{10,}", text):  # one long run of capitals with the spaces lost
+        text = _split_compact(text)
+    elif text.isupper() and len(text) > 4:
+        # Long words become "Systems"; short ones stay as acronyms ("OSI / CMIP", "OLTP VS OLAP Systems").
+        text = " ".join(w.capitalize() if len(w) > 5 and w.isalpha() else w for w in text.split())
+    return text or "Selected material"
+
+
+_FRAGMENT_START = re.compile(r"^[\s.\-–•·o]+(?=[A-Z0-9\"(])")
+_ABBREVIATIONS = ((re.compile(r"\be\.\s*g\.\s*", re.I), "e.g. "), (re.compile(r"\bi\.\s*e\.\s*", re.I), "i.e. "))
+_CLAUSE_BREAKS = ("; ", ", which ", ", while ", " — ")
+_DANGLING_END = frozenset("and or of in the to a an for with as such by on at from that which".split())
+
+
+def _fit(sentence: str, max_len: int) -> str:
+    """The sentence, or a complete clause of it if it is too long ("" when it cannot be cut cleanly)."""
+    if len(sentence) <= max_len:
+        return sentence
+    window = sentence[:max_len]
+    for token in _CLAUSE_BREAKS:
+        cut = window.rfind(token)
+        if cut >= max_len * 0.55:
+            return window[:cut].rstrip(" ,;—-") + "."
+    return ""
+
+
+def readable_sentences(
+    text: str, min_len: int = 35, max_len: int = 200, drop_prefix: str = ""
+) -> list[str]:
     """
+    Split flattened slide text into short, complete, student-readable sentences.
+
+    PDF text arrives as one run-on blob (headings glued to body text, table
+    cells, fragments left by chunk overlap). Only grammatical-looking sentences
+    survive: headings, table-like runs, fragments and anything that cannot be
+    shortened to a complete clause are dropped. Never ends in "..." and never
+    contains "[Chunk N]" markers.
+    """
+    text = re.sub(r"\[Chunk[^\]]*\]", " ", text or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    for pattern, replacement in _ABBREVIATIONS:
+        text = pattern.sub(replacement, text)
+    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
+    spaced = re.match(r"^((?:[A-Z]\s+){3,}[A-Z])\b\s*(.*)$", text)
+    if spaced:
+        text = spaced.group(2)
+    drop_prefix = " ".join((drop_prefix or "").split())
+    if drop_prefix:
+        numberless = re.sub(r"^\d{1,2}[.)]\s*", "", text)  # "12. IEEE Standards ..." -> "IEEE Standards ..."
+        if numberless.lower().startswith(drop_prefix.lower()):
+            text = numberless[len(drop_prefix):]
+        elif text.lower().startswith(drop_prefix.lower()):
+            text = text[len(drop_prefix):]
+
+    out: list[str] = []
+    seen = set()
+    for raw in re.split(r"(?<=[.!?])\s+(?=[A-Z\"(•])", text):
+        sentence = _FRAGMENT_START.sub("", raw).strip(" •·-–")
+        sentence = re.sub(r"(?:\.{2,}|…)\s*$", "", sentence).strip()
+        sentence = re.sub(r"\s+\d{1,2}\.$", "", sentence)          # a list number left behind: "... properties: 1."
+        sentence = re.sub(r"^(?:Definition|Explanation)\s+(?=[A-Z])", "", sentence)
+        sentence = re.sub(r"^[A-Z][A-Za-z&/() -]{2,45}?\s+Definition\s+(?=[A-Z])", "", sentence)  # "Heading Definition A ..."
+        repeated = re.match(r"^([A-Z][A-Za-z&/() -]{2,45}?)\s+(?:(?:A|An|The)\s+)?\1\b", sentence)
+        if repeated:  # "Heading A Heading refers to ..." -> "A Heading refers to ..."
+            sentence = sentence[len(repeated.group(1)) + 1:]
+        if _META_TALK.search(sentence) or _CHAT_OPENER.match(sentence):
+            continue  # "your sir has highlighted ...", "Perfect. ..." : study-chat filler, not course content
+        if re.search(r"[→↓↑↔│┌└]|::=| = ", sentence):
+            continue  # a diagram flattened into text
+        if "•" in sentence or sentence.count(" — ") >= 2 or re.search(r"\b(?:e\.g|i\.e)\.$", sentence):
+            continue  # a bullet list or table row flattened into one line
+        sentence = re.sub(r"^[^.]{0,70}\+[^.]{0,70}\)\s+(?=[A-Z])", "", sentence)  # "A + B (gloss) Real sentence"
+        if not sentence or not sentence[0].isupper():
+            continue
+        if sentence[-1] in ",;:" or sentence.rstrip(".!?").split()[-1:] and sentence.rstrip(".!?").split()[-1].lower() in _DANGLING_END:
+            continue  # the chunk was cut mid-sentence
+        if sentence[-1] not in ".!?":
+            sentence += "."
+        sentence = _fit(sentence, max_len)
+        words = sentence.split()
+        if len(sentence) < min_len or len(words) < 6:
+            continue
+        capitalised = sum(1 for w in words if w[:1].isupper())
+        if capitalised / len(words) > 0.55:  # a heading or a table row, not a sentence
+            continue
+        key = sentence.lower()[:80]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(sentence)
+    return out
+
+
+_META_TALK = re.compile(
+    r"\b(?:your (?:sir|professor|teacher|textbook|book|notes|highlights?)|highlighted|you pasted|pasted notes|"
+    r"I['’]ll|I['’]d|I would|let['’]s|CAT ?\d|your (?:note|table)|you (?:should|must|need|don['’]t need)|"
+    r"that['’]s (?:the easiest|all you)|exam hint)\b",
+    re.I,
+)
+_DANGLING = frozenset("for to of and or the a an in with that by on is are as at from which your our their this its".split())
+_CHAT_OPENER = re.compile(r"^(?:Perfect|Absolutely|Great|Okay|Exactly|Remember|Memory|Notice|Now|Next|Alright|Nice|Sure|So|Think|Just|Important|Simple|And|But)\b[:,]?")
+
+
+def is_title_like(section: str, numbered: bool = False) -> bool:
+    """True when a stored section tag is a real heading, not a sentence, a diagram label or chat filler."""
+    section = (section or "").strip()
+    if not 3 <= len(section) <= 60 or section.endswith((",", ".", ";", ":")):
+        return False
+    if re.search(r"[=+>→↓↑↔│┌└├┐┘%]", section):
+        return False  # a formula or diagram line, not a heading
+    letters = sum(c.isalpha() for c in section)
+    if letters < 3 or letters / len(section) < 0.5:
+        return False  # "/ \\", arrows, box drawing
+    if not (section[0].isupper() or section[0].isdigit() or section[0] in "(“\""):
+        return False  # a sentence cut off mid-way
+    if _META_TALK.search(section) or _CHAT_OPENER.match(section):
+        return False
+    words = section.split()
+    if words[-1].lower() in _DANGLING or section.count("?") > 1:
+        return False  # a sentence cut off ("Three things are required for") or a list of questions
+    if len({w.lower() for w in words}) == 1 and len(words) > 1:
+        return False  # "MIB MIB MIB"
+    if len(words) == 1 and (len(section) < (2 if numbered else 5) or section.lower() in {"this", "that", "here", "note", "so", "example"}):
+        return False  # a numbered heading may be a short acronym: "8. TMN"
+    return True
+
+
+def chunk_sentences(doc, min_len: int = 35, max_len: int = 200) -> list[str]:
+    """`readable_sentences` of one chunk, with its slide heading removed from the front."""
+    section = doc.metadata.get("section") or ""
+    return readable_sentences(
+        doc.page_content, min_len=min_len, max_len=max_len,
+        drop_prefix=section if is_title_like(section) else "",
+    )
+
+
+_NUMBERED_HEADING = re.compile(r"^(?:\d{1,2}[.)]|[①②③④⑤⑥⑦⑧⑨])\s*(?=\S)")
+
+
+def page_heading(raw_page_text: str) -> tuple[str | None, bool]:
+    """(heading, is_numbered) for a page: the first line that looks like a title, or (None, False)."""
+    first_line = None
     for line in raw_page_text.splitlines():
         line = line.strip()
         if not line or len(line) < 3 or line.isdigit():
             continue
-        # The line itself can carry the same glued-word/bullet artifacts as
-        # the body text, so run it through the same cleanup before trimming.
-        return normalize_page_text(line)[:80]
-    return None
+        cleaned = normalize_page_text(line)[:80]
+        if first_line is None:
+            first_line = cleaned
+        numbered = bool(_NUMBERED_HEADING.match(cleaned))
+        candidate = _NUMBERED_HEADING.sub("", cleaned).strip()
+        if is_title_like(candidate, numbered) and (numbered or len(candidate.split()) >= 2):
+            return candidate, numbered
+    if first_line and is_title_like(first_line):
+        return first_line, False  # a one-word title such as "Electronics"
+    return None, False
+
+
+def extract_section_title(raw_page_text: str) -> str | None:
+    """
+    The page's heading, or None when it has none (such a page continues the previous topic).
+
+    Slide decks put the title first. Notes written as running text start pages mid-sentence and put
+    headings further down ("3. OSI / CMIP"), so sentences, diagram labels and chat filler are skipped.
+    Must run on the raw (pre-normalization) text so line boundaries are still intact.
+    """
+    return page_heading(raw_page_text)[0]

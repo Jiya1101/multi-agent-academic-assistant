@@ -33,19 +33,34 @@ from rag_core.config import (
     TOP_K,
     RELEVANCE_SCORE_THRESHOLD,
 )
-from rag_core.embeddings import get_embeddings
-from rag_core.loader import load_pdf, load_all_pdfs
-from rag_core.normalize import normalize_page_text, extract_section_title
-from rag_core.splitter import split_documents
-from rag_core.vectorstore import (
-    build_vectorstore,
-    save_vectorstore,
-    load_vectorstore,
-    vectorstore_exists,
-    get_retriever,
-)
-from rag_core.llm import get_llm
-from rag_core.chain import answer_question
+
+_LAZY_EXPORTS = {
+    "get_embeddings": ("rag_core.embeddings", "get_embeddings"),
+    "load_pdf": ("rag_core.loader", "load_pdf"),
+    "load_all_pdfs": ("rag_core.loader", "load_all_pdfs"),
+    "normalize_page_text": ("rag_core.normalize", "normalize_page_text"),
+    "extract_section_title": ("rag_core.normalize", "extract_section_title"),
+    "split_documents": ("rag_core.splitter", "split_documents"),
+    "build_vectorstore": ("rag_core.vectorstore", "build_vectorstore"),
+    "save_vectorstore": ("rag_core.vectorstore", "save_vectorstore"),
+    "load_vectorstore": ("rag_core.vectorstore", "load_vectorstore"),
+    "vectorstore_exists": ("rag_core.vectorstore", "vectorstore_exists"),
+    "get_retriever": ("rag_core.vectorstore", "get_retriever"),
+    "get_llm": ("rag_core.llm", "get_llm"),
+    "answer_question": ("rag_core.chain", "answer_question"),
+}
+
+
+def __getattr__(name):
+    """Load optional-heavy helpers only when a caller actually asks for them."""
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module 'rag_core' has no attribute {name!r}")
+    module_name, attr_name = _LAZY_EXPORTS[name]
+    from importlib import import_module
+
+    value = getattr(import_module(module_name), attr_name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "DATA_DIR",

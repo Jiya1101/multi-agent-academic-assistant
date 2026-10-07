@@ -11,6 +11,7 @@ clusters is not fixed in advance -- it depends on what students actually ask.
 """
 
 from collections import Counter
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Sequence
 
@@ -20,7 +21,7 @@ from sklearn.cluster import AgglomerativeClustering
 
 from rag_core.config import CLUSTER_DISTANCE_THRESHOLD
 from rag_core.embeddings import get_embeddings
-from rag_core.normalize import short_section_title
+from rag_core.normalize import human_title, short_section_title
 
 
 @dataclass
@@ -90,7 +91,7 @@ def topic_title(chunk: Dict[str, Any]) -> str:
     """Short, file-qualified slide title used as the unit of a 'topic'."""
     if chunk.get("section"):
         return short_section_title(chunk["section"])
-    return chunk.get("source", "unknown")
+    return human_title(Path(chunk.get("source", "unknown")).name)
 
 
 def summarize_clusters(

@@ -292,3 +292,68 @@ class TopicListTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReadableSentencesTests(unittest.TestCase):
+    def test_heading_fragments_and_cut_off_tails_are_dropped(self):
+        from rag_core.normalize import readable_sentences
+        text = (
+            "What is Multimedia? Multimedia is the integration of several forms of digital media into one "
+            "application. It is widely used in education, entertainment,"
+        )
+        self.assertEqual(
+            readable_sentences(text, drop_prefix="What is Multimedia?"),
+            ["Multimedia is the integration of several forms of digital media into one application."],
+        )
+
+    def test_no_ellipsis_and_no_chunk_markers(self):
+        from rag_core.normalize import readable_sentences
+        for sentence in readable_sentences("A medium carries information from sender to receiver... [Chunk 2] Storage keeps data safe for later use by the system."):
+            self.assertNotIn("...", sentence)
+            self.assertNotIn("Chunk", sentence)
+
+    def test_spaced_and_glued_titles_read_normally(self):
+        from rag_core.normalize import human_title
+        self.assertEqual(human_title("M U L T I M E D I A S Y S T E M S"), "Multimedia Systems")
+        self.assertEqual(human_title("MULTIMEDIASYSTEMS"), "Multimedia Systems")
+
+
+class HeadingDetectionTests(unittest.TestCase):
+    def test_sentences_and_diagram_labels_are_not_headings(self):
+        from rag_core.normalize import is_title_like
+        for text in ["This", "So", "/ \\", "Another highlighted point:", "MIB MIB MIB",
+                     "Here, each NMS acts as both Manager and Agent.", "Three things are required for",
+                     "SNMP = Manager + Agent"]:
+            self.assertFalse(is_title_like(text), text)
+        for text in ["Electronics", "Psychology (HCI)", "What is Multimedia?", "Manager of Managers (M M)"]:
+            self.assertTrue(is_title_like(text), text)
+
+    def test_heading_is_found_below_a_leading_sentence(self):
+        from rag_core.normalize import extract_section_title
+        page = "This comparison is very important for CAT 1.\n3. OSI / CMIP\nCMIP = Common Management Information Protocol"
+        self.assertEqual(extract_section_title(page), "OSI / CMIP")
+        self.assertIsNone(extract_section_title("You don't need to go deeply into it.\nJust understand: x."))
+
+    def test_chat_filler_is_not_course_content(self):
+        from rag_core.normalize import readable_sentences
+        text = ("Perfect. This is the first topic and your sir has highlighted the portions that matter. "
+                "A network management standard defines a common way to manage network components.")
+        self.assertEqual(readable_sentences(text),
+                         ["A network management standard defines a common way to manage network components."])
+
+
+class QuizVarietyTests(unittest.TestCase):
+    def test_mixed_quiz_uses_several_question_types(self):
+        import random
+        from agents.quiz_generator import _abbreviation_questions
+        docs = [Document(page_content=f"{a} = {e} It is used a lot.", metadata={"source": "a.pdf", "page": i})
+                for i, (a, e) in enumerate([("CMIP", "Common Management Information Protocol"),
+                                            ("MIB", "Management Information Base"),
+                                            ("SNMP", "Simple Network Management Protocol"),
+                                            ("TMN", "Telecommunications Management Network")])]
+        questions = _abbreviation_questions(docs, random.Random(1))
+        self.assertTrue(questions)
+        for q in questions:
+            self.assertTrue(q["question"].startswith("What does"))
+            self.assertEqual(len(set(q["options"])), 4)
+            self.assertNotIn("It is used", q["options"][q["answer_index"]])

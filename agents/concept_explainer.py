@@ -12,6 +12,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from agents.base import Agent, AgentContext, AgentResult
 from rag_core.chain import NOT_COVERED_MESSAGE, format_context, retrieve
 from rag_core.llm import get_llm
+from rag_core.normalize import chunk_sentences
 from rag_core.query_log import log_query
 
 _LEVELS = {
@@ -34,8 +35,9 @@ Level: {level_rules}
 Rules:
 - Every factual statement must come from the context. Cite it as [Chunk N].
 - If the context does not cover part of the concept, say what is missing instead of filling the gap.
-- Structure: one-sentence definition, then numbered steps or short bullets, then a line starting \
-"Check yourself:" with one question the student can answer from the notes.
+- Keep it concise. Structure: one-sentence definition, then at most 5 short numbered steps or \
+bullets (one idea each), then a line starting "Check yourself:" with one question the student can \
+answer from the notes.
 
 --- CONTEXT ---
 {context}
@@ -62,13 +64,27 @@ class ConceptExplainer(Agent):
 
         if retrieval.relevant:
             chain = _PROMPT | (ctx.llm if ctx.llm is not None else get_llm()) | StrOutputParser()
-            text = chain.invoke(
-                {
-                    "level_rules": _LEVELS.get(level, _LEVELS["beginner"]),
-                    "context": format_context(retrieval.chunks),
-                    "request": request,
-                }
-            )
+            try:
+                text = chain.invoke(
+                    {
+                        "level_rules": _LEVELS.get(level, _LEVELS["beginner"]),
+                        "context": format_context(retrieval.chunks),
+                        "request": request,
+                    }
+                )
+            except Exception:
+                excerpts = []
+                seen = set()
+                for i, doc in enumerate(retrieval.chunks[:4], start=1):
+                    for sentence in chunk_sentences(doc, max_len=260)[:2]:
+                        if sentence.lower()[:80] not in seen:
+                            seen.add(sentence.lower()[:80])
+                            excerpts.append(f"- {sentence} [Chunk {i}]")
+                text = (
+                    "I found relevant material, but the local LLM is not available right now. "
+                    "Use these course excerpts as a grounded explanation:\n\n"
+                    + "\n".join(excerpts[:5])
+                )
         else:
             text = NOT_COVERED_MESSAGE
 

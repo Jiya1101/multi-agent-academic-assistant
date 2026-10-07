@@ -19,6 +19,7 @@ professor) instead of being written from the model's own knowledge.
 
 import json
 import re
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from langchain_core.output_parsers import StrOutputParser
@@ -26,8 +27,10 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from agents.base import Agent, AgentContext, AgentResult
 from rag_core.chain import NOT_COVERED_MESSAGE, STOPWORDS as _STOPWORDS, format_context, retrieve
+from rag_core.config import FACULTY_SOURCE_NAME
 from rag_core.insights import topic_title
 from rag_core.llm import get_json_llm
+from rag_core.normalize import human_title, is_title_like, readable_sentences
 from rag_core.query_log import log_query
 
 NO_EXAMPLE = "The notes do not give an example."
@@ -35,6 +38,7 @@ NOTES_K = 5                 # chunks of context per topic
 KEY_POINT_MIN_SUPPORT = 0.5  # share of a bullet's content words found in the context
 USE_CASE_MIN_SUPPORT = 0.4
 MAX_KEY_POINTS = 6
+MAX_NOTE_POINTS = 3          # key points per section in whole-material notes
 # A statement that survives the support filter but still contains this many words
 # absent from the source is marked "check this". Word overlap cannot tell a fair
 # paraphrase from an invented detail, so these are flagged for the reader, not removed.
@@ -109,6 +113,22 @@ def _clean(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 3].rsplit(" ", 1)[0] + "..."
 
 
+def _clean_note_sentence(value: str) -> str:
+    text = human_title(" ".join((value or "").split()))
+    text = re.sub(r"\bEnd of Chapter\s+\d+\b", "", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" -–")
+    return text
+
+
+def _sentences(text: str) -> List[str]:
+    out = []
+    for sentence in re.split(r"(?<=[.!?])\s+", " ".join(text.split())):
+        sentence = _clean_note_sentence(sentence)
+        if 45 <= len(sentence) <= 320 and not re.fullmatch(r"[A-Z](?:\s+[A-Z]){3,}.*", sentence):
+            out.append(sentence)
+    return out
+
+
 def parse_notes_json(raw: str, n_chunks: int) -> Optional[Dict[str, Any]]:
     """The note content from the model's JSON, or None if it is unusable."""
     try:
@@ -139,6 +159,72 @@ def parse_notes_json(raw: str, n_chunks: int) -> Optional[Dict[str, Any]]:
     }
 
 
+def fallback_notes_from_chunks(topic: str, chunks: List[Any]) -> Optional[Dict[str, Any]]:
+    """Extractive notes used when document-level note generation cannot call the local LLM."""
+    sentences = []
+    for doc in chunks:
+        for sentence in re.split(r"(?<=[.!?])\s+", doc.page_content):
+            sentence = _clean(sentence, 240)
+            if len(sentence) >= 35:
+                sentences.append(sentence)
+    if not sentences:
+        return None
+    return {
+        "heading": topic,
+        "definition": sentences[0],
+        "key_points": sentences[1: 1 + min(MAX_KEY_POINTS, max(3, len(sentences) - 1))] or sentences[:1],
+        "use_case": NO_EXAMPLE,
+        "chunks": list(range(1, min(len(chunks), 3) + 1)),
+    }
+
+
+def group_material(ctx: AgentContext) -> List[Dict[str, Any]]:
+    """
+    The selected material as topics: one group per heading, with all the text under it.
+
+    A page whose first line is a sentence, not a title, carries on the previous topic and is
+    merged into it. Used by the study notes and by the oral check, so both talk about the same headings.
+    """
+    selected = set(ctx.source_filenames or [])
+    docs = list(ctx.vectorstore.docstore._dict.values())
+    docs.sort(key=lambda d: (Path(d.metadata.get("source", "")).name, d.metadata.get("page") or 0))
+    groups: List[Dict[str, Any]] = []
+    for doc in docs:
+        source = Path(doc.metadata.get("source", "")).name
+        if source == FACULTY_SOURCE_NAME or (selected and source not in selected):
+            continue
+        page = (doc.metadata.get("page") or 0) + 1
+        section = doc.metadata.get("section") or ""
+        title_like = is_title_like(section)
+        last = groups[-1] if groups else None
+        if last and last["file"] == source and last["pages"][-1] == page:
+            last["text"] += " " + doc.page_content
+        elif last and last["file"] == source and not title_like:
+            last["text"] += " " + doc.page_content
+            last["pages"].append(page)
+        else:
+            groups.append({
+                "file": source, "pages": [page], "text": doc.page_content,
+                "title": section if title_like else "", "section": section if title_like else "",
+            })
+    return groups
+
+
+def major_headings(ctx: AgentContext, min_sentences: int = 3) -> List[Dict[str, Any]]:
+    """Headings with enough material under them to ask about: heading plus every sentence beneath it."""
+    out = []
+    for group in group_material(ctx):
+        if not group["title"]:
+            continue
+        sentences = readable_sentences(group["text"], max_len=300, drop_prefix=group["section"])
+        if len(sentences) >= min_sentences:
+            out.append({
+                "heading": human_title(group["title"]), "sentences": sentences,
+                "file": group["file"], "pages": group["pages"], "text": group["text"],
+            })
+    return out
+
+
 class NoteGenerator(Agent):
     name = "Note Generator"
     job = "Write heading-wise study notes (definition, key points, use case) from the material."
@@ -149,6 +235,7 @@ class NoteGenerator(Agent):
         ctx: AgentContext,
         topics: Optional[List[str]] = None,
         on_progress: Optional[Callable[[int, int, str], None]] = None,
+        allow_fallback: bool = False,
         **_,
     ) -> AgentResult:
         topics = [t for t in (topics or [request]) if t and t.strip()]
@@ -175,10 +262,15 @@ class NoteGenerator(Agent):
             chunks = retrieval.chunks
             variables = {"topic": topic, "context": format_context(chunks), "no_example": NO_EXAMPLE}
             parsed = None
-            for _attempt in range(2):  # one retry: small models fail JSON now and then
-                parsed = parse_notes_json(chain.invoke(variables), n_chunks=len(chunks))
-                if parsed:
-                    break
+            try:
+                for _attempt in range(2):  # one retry: small models fail JSON now and then
+                    parsed = parse_notes_json(chain.invoke(variables), n_chunks=len(chunks))
+                    if parsed:
+                        break
+            except Exception:
+                parsed = fallback_notes_from_chunks(topic, chunks) if allow_fallback else None
+            if parsed is None and allow_fallback:
+                parsed = fallback_notes_from_chunks(topic, chunks)
             if not parsed:
                 failed.append(topic)
                 continue
@@ -248,5 +340,77 @@ class NoteGenerator(Agent):
                 "title": title,
                 "files": sorted({s["file"] for sec in sections for s in sec["sources"]}),
                 "log_id": log_ids[0] if log_ids else None,
+            },
+        )
+
+    def run_from_material(
+        self,
+        ctx: AgentContext,
+        on_progress: Optional[Callable[[int, int, str], None]] = None,
+        **_,
+    ) -> AgentResult:
+        """Generate extractive notes from every readable section of the selected material."""
+        selected = set(ctx.source_filenames or [])
+        groups = group_material(ctx)
+
+        sections: List[Dict[str, Any]] = []
+        total = len(groups)
+        for done, group in enumerate(groups):
+            if on_progress:
+                on_progress(done, total, group["file"])
+            sentences = readable_sentences(group["text"], max_len=240, drop_prefix=group["section"])
+            if not sentences:
+                continue
+            use_case = NO_EXAMPLE
+            for i, sentence in enumerate(sentences):
+                if re.match(r"(For )?[Ee]xample\b", sentence) and i > 0:
+                    use_case = re.sub(r"^(For )?[Ee]xample\s*[:,—-]?\s*", "", sentence)
+                    use_case = use_case[:1].upper() + use_case[1:]
+                    del sentences[i]
+                    break
+            heading = human_title(group["title"]) if group["title"] else human_title(Path(group["file"]).stem)
+            sections.append({
+                "topic": heading,
+                "heading": prettify_heading(heading),
+                "definition": sentences[0],
+                "definition_support": 1.0,
+                "key_points": sentences[1: 1 + MAX_NOTE_POINTS] or sentences[:1],
+                "use_case": use_case,
+                "check": {"key_points": [], "use_case": False},
+                "sources": [
+                    {"file": group["file"], "page": page, "slide": heading} for page in group["pages"]
+                ],
+            })
+        if on_progress:
+            on_progress(len(sections), max(1, len(sections)), "")
+        if not sections:
+            return AgentResult(
+                agent=self.name,
+                kind="notes",
+                grounded=False,
+                text="No readable sections were found in the selected material.",
+                data={
+                    "sections": [],
+                    "skipped": [],
+                    "failed": [],
+                    "dropped": 0,
+                    "title": "Study Notes",
+                    "files": sorted(selected),
+                    "log_id": None,
+                },
+            )
+        return AgentResult(
+            agent=self.name,
+            kind="notes",
+            text=f"Notes ready for {len(sections)} section(s).",
+            grounded=True,
+            data={
+                "sections": sections,
+                "skipped": [],
+                "failed": [],
+                "dropped": 0,
+                "title": "Study Notes: " + ", ".join(sorted(selected)) if selected else "Study Notes",
+                "files": sorted({s["file"] for sec in sections for s in sec["sources"]}),
+                "log_id": None,
             },
         )

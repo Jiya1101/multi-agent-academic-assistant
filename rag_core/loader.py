@@ -19,7 +19,7 @@ from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFLoader
 
 from rag_core.config import DATA_DIR
-from rag_core.normalize import normalize_page_text, extract_section_title
+from rag_core.normalize import normalize_page_text, page_heading
 
 
 def load_pdf(file_path: str | Path) -> List[Document]:
@@ -27,12 +27,20 @@ def load_pdf(file_path: str | Path) -> List[Document]:
     loader = PyPDFLoader(str(file_path))
     pages = loader.load()
 
+    found = []
     for page in pages:
         raw_text = page.page_content
-        section = extract_section_title(raw_text)
-        if section:
-            page.metadata["section"] = section
+        found.append(page_heading(raw_text))
         page.page_content = normalize_page_text(raw_text)
+
+    # Notes that number their sections ("3. OSI / CMIP") have many smaller unnumbered lines that look like
+    # titles (diagram labels, sub-points). When numbering is the document's way of marking sections, only
+    # numbered headings count; other pages continue the previous topic.
+    numbered_pages = sum(1 for title, numbered in found if title and numbered)
+    numbering_is_structure = numbered_pages >= max(5, 0.25 * len(pages))
+    for page, (title, numbered) in zip(pages, found):
+        if title and (numbered or not numbering_is_structure):
+            page.metadata["section"] = title
 
     return pages
 

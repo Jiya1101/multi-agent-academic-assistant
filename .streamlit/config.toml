@@ -1,0 +1,21 @@
+[theme]
+base = "light"
+primaryColor = "#5E7F5C"
+backgroundColor = "#F6F1E6"
+secondaryBackgroundColor = "#EBE3D0"
+textColor = "#3F3A2E"
+linkColor = "#5E7F5C"
+borderColor = "#D8CDB2"
+baseRadius = "0.8rem"
+font = "sans serif"
+
+[theme.sidebar]
+backgroundColor = "#E4DCC6"
+secondaryBackgroundColor = "#D8CEB3"
+
+[client]
+toolbarMode = "minimal"
+showSidebarNavigation = false
+
+[browser]
+gatherUsageStats = false

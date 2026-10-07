@@ -98,7 +98,7 @@ def _section_flowables(section: Dict[str, Any], styles: Dict[str, ParagraphStyle
             # ZapfDingbats is a standard PDF font with a real bullet glyph. ReportLab's
             # ListFlowable bullet was written as an undefined byte in Helvetica.
             flowables.append(Paragraph(pdf_safe(point + mark), styles["bullet"], bulletText="l"))
-    if section.get("use_case"):
+    if section.get("use_case") and section["use_case"] != "The notes do not give an example.":
         flowables.append(Paragraph("Use case", styles["h2"]))
         mark = CHECK_MARK if check.get("use_case") else ""
         flowables.append(Paragraph(pdf_safe(section["use_case"] + mark), styles["body"]))
