@@ -14,10 +14,12 @@ Built as a B.Tech project: *Multi-Agent AI Framework for Personalized Academic A
 ## What it does
 
 **For students**
-- **Ask** questions about the notes (by typing or **speaking**); get cited answers and see the exact passages used.
-- **Study notes**: heading-wise notes (definition, key points, use case) for chosen topics, as a **downloadable PDF**.
-- **Quizzes**: multiple-choice questions written from the notes; scores feed a personal progress view.
-- **Progress**: strong and weak topics, and a "what should I study next" suggestion.
+- **Material**: add PDFs, choose what you are studying once (every section uses it), and delete a file together with the progress tied to it.
+- **Ask** questions about the material (by typing or **speaking**); get a short, structured answer. A message with two questions gets both answered.
+- **Oral check**: a spoken question on one of the material's main headings, a different one each time. You get a content score, the key points you missed, the full model answer and pause/fluency metrics.
+- **Study notes**: heading-wise notes (definition, key points, use case when the slides give one), as a **downloadable PDF**.
+- **Quiz**: a new set of multiple-choice questions every time (definitions, abbreviations, true statements, which topic), plus a focused test on one topic.
+- **My progress**: one tab per material with quiz scores, topics, oral checks and a "focus next" suggestion.
 
 **For professors**
 - **Class Insight**: student questions grouped by meaning, with the slides students keep landing on.
@@ -27,7 +29,7 @@ Built as a B.Tech project: *Multi-Agent AI Framework for Personalized Academic A
 
 ## The agents
 
-Seven agents with different jobs, coordinated by an orchestrator that routes each message and hands work
+Eight agents with different jobs, coordinated by an orchestrator that routes each message and hands work
 between them. The app shows which agents ran in an "Agents involved" panel.
 
 | Agent | Job |
@@ -36,6 +38,7 @@ between them. The app shows which agents ran in an "Agents involved" panel.
 | Concept Explainer | Teach a concept step by step (beginner or detailed) |
 | Quiz Generator | Write multiple-choice questions strictly from the notes |
 | Note Generator | Write heading-wise study notes and export them as PDF |
+| Oral Assessor | Ask a spoken question on a heading, score the answer's content and fluency, and list the points missed |
 | Progress Tracker | Per-student strong and weak topics from questions and quiz scores |
 | Faculty Insight | Cluster the class's questions; find topics the class keeps asking about |
 | Gap Handler | Queue a question the notes cannot answer for the professor |
