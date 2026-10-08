@@ -69,3 +69,13 @@ CLUSTER_DISTANCE_THRESHOLD = 0.55
 
 # Source name given to professor-written answers that are added to the index.
 FACULTY_SOURCE_NAME = "Faculty Answers"
+
+# A question counts as a "follow-up" when the same session already asked about
+# the same slide topic within this many minutes. It measures "came back to the
+# same topic", which is a proxy for a clarifying follow-up, not proof of one.
+FOLLOW_UP_WINDOW_MINUTES = 30
+
+# Per-question and per-option numbers are only shown to a professor once at
+# least this many different students took the quiz, so a result can never be
+# traced back to one or two people. A judgment call, not a statistical rule.
+MIN_COHORT = 5

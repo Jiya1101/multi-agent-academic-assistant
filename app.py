@@ -26,6 +26,7 @@ Run with:
 
 import hashlib
 import re
+import uuid
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -33,9 +34,17 @@ import streamlit as st
 
 from agents import AgentContext, Orchestrator
 from agents.routing import ROUTE_LABELS
-from rag_core.config import DATA_DIR, DB_DIR, FACULTY_SOURCE_NAME, TOP_K
+from rag_core.config import DATA_DIR, DB_DIR, FACULTY_SOURCE_NAME, MIN_COHORT, TOP_K
 from rag_core.embeddings import get_embeddings
 from rag_core.insights import cluster_questions, slide_label, summarize_clusters
+from rag_core.item_analysis import (
+    FLAG_HELP,
+    KEY_SUSPECT_AT,
+    SIGNIFICANT_P,
+    analyze_quizzes,
+    likely_misconceptions,
+    questions_to_review,
+)
 from rag_core.learning_log import (
     SCOPE_CLASS,
     SCOPE_PERSONAL,
@@ -52,6 +61,7 @@ from rag_core.pdf_export import CHECK_LEGEND, CHECK_MARK, notes_to_pdf, source_l
 from rag_core.query_log import (
     STATUS_GAP,
     STATUS_RESOLVED,
+    interaction_summary,
     list_queries,
     resolve_gaps,
     resolved_answers,
@@ -154,11 +164,18 @@ def _get_vectorstore():
     return _load_index(index_version(DB_DIR))
 
 
+def _interaction_session_id() -> str:
+    """A random token for this browser session. It links a student's follow-up questions together
+    (even when anonymous) and is not tied to a person."""
+    return st.session_state.setdefault("interaction_session_id", uuid.uuid4().hex[:12])
+
+
 def _context(vectorstore, student_id=None, sources=None) -> AgentContext:
     return AgentContext(
         vectorstore=vectorstore,
         db_dir=DB_DIR,
         student_id=student_id,
+        session_id=_interaction_session_id(),
         source_filenames=sources,
         embeddings=_load_embeddings(),
     )
@@ -1001,6 +1018,15 @@ def _render_class_insight() -> None:
     col_gap.metric("Not covered by the notes", unanswered)
     col_resolved.metric("Resolved by faculty", resolved)
 
+    activity = interaction_summary(DB_DIR)
+    explain = activity["by_agent"].get("Concept Explainer", 0)
+    st.caption(
+        f"{activity['sessions']} browsing session(s) recorded. {explain} explanation request(s). "
+        f"{activity['follow_ups']} question(s) came back to a topic already asked about in the same session. "
+        f"{activity['untracked']} question(s) have no session information (asked before sessions were recorded, "
+        "or simulated)."
+    )
+
     with st.spinner("Grouping questions by meaning ..."):
         clusters = summarize_clusters(rows, _load_embeddings())
 
@@ -1111,6 +1137,105 @@ def _render_class_quizzes() -> None:
         width="stretch",
     )
     st.caption("Results are aggregated; individual students are not shown.")
+    _render_item_analysis(quizzes, attempts)
+
+
+def _discrimination_text(q) -> str:
+    value = q.discrimination
+    if value is None:
+        return "Not enough data"
+    if q.discrimination_p >= SIGNIFICANT_P:
+        return f"Unclear ({value:+.2f})"       # too few students to tell this apart from chance
+    if value >= 0.1:
+        return f"Yes ({value:+.2f})"
+    if value > KEY_SUSPECT_AT:
+        return f"No difference ({value:+.2f})"
+    return f"Reversed ({value:+.2f})"
+
+
+def _render_item_analysis(quizzes, attempts) -> None:
+    """What the class's answers say about each quiz question: likely misconceptions and weak questions."""
+    st.subheader("Question analysis")
+    st.caption(
+        f"Looks at every question and every answer option. Numbers appear only once at least {MIN_COHORT} different "
+        "students have taken a quiz, and only each student's first attempt counts."
+    )
+    analyses = analyze_quizzes(quizzes, attempts)
+    waiting = [a for a in analyses if not a.reportable]
+    ready = [a for a in analyses if a.reportable]
+    for a in waiting:
+        st.caption(f"{human_title(a.topic)}: {a.students} of the {a.needed} students needed so far.")
+    if not ready:
+        st.info("No quiz has enough students yet for a question-level view.")
+        return
+
+    st.markdown("**Likely misconceptions**")
+    misconceptions = likely_misconceptions(ready)
+    if not misconceptions:
+        st.info(
+            "No wrong answer clearly stood out. That does not rule one out: with a small class a real shared "
+            "mistake can be missed."
+        )
+    for q in misconceptions:
+        wrong = q.misconception
+        with st.container(border=True):
+            st.markdown(
+                f"**{human_title(q.topic)}, question {q.number}.** {wrong.share:.0%} of the class "
+                f"({wrong.count} of {q.students}) chose \"{wrong.text}\" instead of \"{q.correct_option.text}\"."
+            )
+            st.write(q.question)
+            src = q.source
+            st.caption(
+                f"This is a pattern worth a look, not proof of a misconception. Source: {src.get('file', '')}, "
+                f"page {src.get('page', '?')} ({src.get('slide', '')})"
+            )
+
+    st.markdown("**Questions to check**")
+    flagged = questions_to_review(ready)
+    if not flagged:
+        st.info("No question was flagged. The checks are cautious, so this is not a guarantee that every question is sound.")
+    for q in flagged:
+        with st.container(border=True):
+            st.markdown(f"**{human_title(q.topic)}, question {q.number}** ({q.correct_rate:.0%} correct)")
+            st.write(q.question)
+            for flag in q.flags:
+                st.caption(f"{flag}: {FLAG_HELP[flag]}")
+
+    st.markdown("**All questions**")
+    for a in ready:
+        with st.expander(f"{human_title(a.topic)} ({a.students} students, average {a.average:.0%})"):
+            st.dataframe(
+                [
+                    {
+                        "Question": f"{q.number}. {q.question}",
+                        "Correct": f"{q.correct_rate:.0%}",
+                        "Skipped": q.skipped,
+                        "Strong students did better?": _discrimination_text(q),
+                        "Flags": ", ".join(q.flags),
+                    }
+                    for q in a.questions
+                ],
+                hide_index=True,
+                width="stretch",
+            )
+            for q in a.questions:
+                st.markdown(f"**{q.number}. {q.question}**")
+                st.dataframe(
+                    [
+                        {
+                            "Answer option": o.text + ("  (correct)" if o.is_correct else ""),
+                            "Chosen by": o.count,
+                            "Share of class": f"{o.share:.0%}",
+                        }
+                        for o in q.options
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
+    st.caption(
+        '"Strong students did better?" compares each question with the results of the same students on the other '
+        "questions. It is a hint from a small class, not a measurement."
+    )
 
 
 def _render_course_material() -> None:

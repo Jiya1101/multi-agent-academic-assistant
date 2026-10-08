@@ -100,6 +100,8 @@ class ConceptExplainer(Agent):
                 scope=ctx.source_filenames,
                 db_dir=ctx.db_dir,
                 student_id=ctx.student_id,
+                agent=self.name,
+                session_id=ctx.session_id,
             )
         return AgentResult(
             agent=self.name,

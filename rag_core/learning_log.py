@@ -134,6 +134,14 @@ def list_attempts(
     return out
 
 
+def delete_attempts_by_prefix(student_prefix: str, db_dir: str | Path = DB_DIR) -> int:
+    """Delete attempts whose student id starts with `student_prefix` (used to clear simulated demo students)."""
+    escaped = student_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    with closing(_connect(db_dir)) as conn, conn:
+        cursor = conn.execute("DELETE FROM attempts WHERE student_id LIKE ? ESCAPE '\\'", (escaped + "%",))
+        return cursor.rowcount
+
+
 def record_route_feedback(
     message: str, predicted: str, correct: str, db_dir: str | Path = DB_DIR
 ) -> int:

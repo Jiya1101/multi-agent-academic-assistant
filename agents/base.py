@@ -26,6 +26,7 @@ class AgentContext:
     vectorstore: FAISS
     db_dir: Path = DB_DIR
     student_id: Optional[str] = None            # None = anonymous
+    session_id: Optional[str] = None            # random token for one browsing session (links follow-ups)
     source_filenames: Optional[Sequence[str]] = None  # None = search all files
     llm: Any = None                             # chat-model override (used by tests)
     embeddings: Any = None                      # embedding-model override

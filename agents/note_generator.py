@@ -256,6 +256,7 @@ class NoteGenerator(Agent):
                 log_ids.append(log_query(
                     question=f"Notes on: {topic}", grounded=False, top_score=retrieval.top_score,
                     source_documents=[], scope=ctx.source_filenames, db_dir=ctx.db_dir, student_id=ctx.student_id,
+                    agent=self.name, session_id=ctx.session_id,
                 ))
                 continue
 
