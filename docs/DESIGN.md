@@ -179,6 +179,71 @@ Read this with care:
 - It finds patterns in answers. Whether a popular wrong answer is a real misconception, a badly worded option, or a
   faulty key is the professor's call, and the dashboard says so.
 
+### Concept confusion (professor)
+
+`rag_core/confusion.py` ranks slide topics by how likely the class is struggling with them. The reasoning: 40
+students asking about deadlock does not mean they are confused, they may just be curious. So no single count is
+used. Seven kinds of evidence about the same concept are combined, and the dashboard (**Concepts to Revisit**)
+shows each one next to the score.
+
+| Signal | Reads as | Needs |
+|---|---|---|
+| Share of the class who asked | breadth (full marks at a quarter of active students) | 5+ identified students |
+| Students who asked more than once | repeat | 5+ identified students |
+| Questions that were follow-ups | came back to the topic in the same session (full marks at half) | 5+ questions with a session |
+| Requests to explain it | asked the Concept Explainer instead of the Doubt Resolver (full marks at half) | 5+ questions with an agent |
+| Students who missed it on the class quiz | 1 minus the pooled first-attempt score | 5+ students on class quizzes |
+| Oral checks not yet strong | share of first oral checks below "Strong" | 5+ students |
+| Asked about on several days | persistence (full marks at 3 different days) | 5+ questions |
+
+Default weights are 15, 10, 15, 10, 30, 10 and 10 percent; the quiz is heaviest because it is the only direct
+performance measure. The professor can change every weight on the page.
+
+Design decisions that matter:
+
+- **Missing evidence is never read as "no confusion".** A signal without enough data is replaced by the class
+  average for that signal, so a concept is neither rewarded nor punished for having less data. Confidence says how
+  many kinds of evidence (questions, quizzes, oral checks) actually back the score: Low, Medium or High.
+- **People-level signals need 5 different students** (the same rule as the quiz analysis).
+- **Anonymous questions count as questions, never as students.** Most of the old demo questions have no identity.
+- **Questions the notes could not answer are not in the score.** They match no slide, so they cannot belong to a
+  concept; they stay in Pending Gaps.
+- **Ranking stability:** the ranking is recomputed under 300 randomly perturbed weight sets, and the page shows how
+  often each concept stays in the top 3. A concept that is first only under one weighting is a weak finding.
+- **A concept is one slide topic.** "ACID" and "BASE" slides are separate concepts; merging slides about one idea
+  is not done yet.
+
+How it was tested: 25 unit tests on hand-built classes (a merely popular topic must not outrank a confusing one;
+missing data must not be read as zero; retakes and personal quizzes must not count; small groups must stay hidden),
+with deliberate breaks of four rules to confirm the tests notice. `python evaluate_confusion.py` simulates 200
+classes per setting with 8 concepts, 2 planted as truly confusing and 1 planted as merely popular. Precision@2 is
+the share of the top 2 that are the confusing ones:
+
+| Setting (class of 24) | Number of questions | Different students asking | Quiz only | Composite, no quiz | Composite |
+|---|---|---|---|---|---|
+| Weak effect of confusion on behaviour | 0.49 | 0.48 | 0.75 | 0.71 | 0.82 |
+| Moderate effect | 0.52 | 0.49 | 0.98 | 0.95 | 0.99 |
+| Strong effect | 0.69 | 0.51 | 1.00 | 1.00 | 1.00 |
+| Moderate effect, only 20% take each quiz | 0.54 | 0.48 | 0.54 | 0.95 | 0.97 |
+
+Read this with care:
+
+- The students come from a model we wrote. In it, confusion causes follow-ups, explanation requests, repeat days,
+  quiz misses and weak oral checks, and the "popular" topic gets more one-off questions than the confusing ones.
+  So the table shows that, IF students behave like that, combining signals beats counting questions. It does not
+  show that real students behave like that, and the counting baselines look bad partly because we built a popular
+  decoy. If confusion produced most of the questions, counting would do better (0.69 in the strong case).
+- The honest summary of the result is narrower than "the composite wins": when most students take the quizzes,
+  the quiz result alone is nearly as good (0.98 vs 0.99). What the other signals add is robustness: they carry the
+  ranking when few students take quizzes (0.97 vs 0.54), when the effects are weak (0.82 vs 0.75), and when there
+  is no quiz at all (0.71 to 0.95 without it, against about 0.5 for counting).
+- Small classes are hard: with 12 students and weak effects the composite gets only 0.68.
+- The weights, the saturation points (a quarter of the class, half the questions, 3 days) and the 5-student
+  minimum are judgment calls. In the demo data the breadth signal saturates for almost every concept, so it adds
+  little there.
+- Nothing here has been compared with real exam results or a professor's own judgment. That comparison is what
+  would turn a ranking aid into an evidence-backed measure.
+
 ### Hand-offs between agents
 
 - **Doubt Resolver / Concept Explainer / Note Generator -> Gap Handler**: the

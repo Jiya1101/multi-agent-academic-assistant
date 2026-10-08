@@ -116,7 +116,7 @@ def _answer_at(answers: List[Optional[int]], index: int, n_options: int) -> Opti
     return pick if isinstance(pick, int) and not isinstance(pick, bool) and 0 <= pick < n_options else None
 
 
-def _first_attempts(attempts: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, int], Dict[str, Any]]:
+def first_attempts(attempts: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, int], Dict[str, Any]]:
     """Each student's first attempt at each quiz."""
     first: Dict[Tuple[str, int], Dict[str, Any]] = {}
     for attempt in sorted(attempts, key=lambda a: a["id"]):
@@ -250,7 +250,7 @@ def analyze_quizzes(
     no per-question numbers at all.
     """
     quiz_by_id = {q["id"]: q for q in quizzes}
-    first = _first_attempts(attempts)
+    first = first_attempts(attempts)
     pool = _ability_pool(quiz_by_id, first)
 
     students_by_quiz: Dict[int, List[str]] = {}

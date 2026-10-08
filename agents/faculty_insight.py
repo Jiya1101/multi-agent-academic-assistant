@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import List
 
 from agents.base import Agent, AgentContext, AgentResult
+from rag_core.confusion import load_and_compute
 from rag_core.embeddings import get_embeddings
 from rag_core.insights import QuestionCluster, summarize_clusters
 from rag_core.query_log import list_queries
@@ -40,7 +41,7 @@ class FacultyInsight(Agent):
         if not rows:
             return AgentResult(
                 agent=self.name, kind="insight", text="No questions logged yet.",
-                data={"clusters": [], "confusion_topics": [], "gap_clusters": [], "rows": rows},
+                data={"clusters": [], "confusion_topics": [], "gap_clusters": [], "rows": rows, "concept_report": None},
             )
 
         clusters: List[QuestionCluster] = summarize_clusters(rows, ctx.embeddings or get_embeddings())
@@ -59,6 +60,7 @@ class FacultyInsight(Agent):
                 break
 
         gap_clusters = [c for c in clusters if c.gap_count]
+        concept_report = load_and_compute(ctx.db_dir)
         text = (
             f"{len(rows)} questions in {len(clusters)} topics. "
             f"{len(confusion)} topic(s) the notes cover but the class keeps asking about; "
@@ -73,5 +75,8 @@ class FacultyInsight(Agent):
                 "confusion_topics": confusion,
                 "gap_clusters": gap_clusters,
                 "rows": rows,
+                # Several kinds of evidence combined per concept (rag_core/confusion.py). The quiz hand-off above
+                # still uses cluster size; switching it to this score is a separate, deliberate change.
+                "concept_report": concept_report,
             },
         )

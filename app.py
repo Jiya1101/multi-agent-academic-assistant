@@ -35,6 +35,7 @@ import streamlit as st
 from agents import AgentContext, Orchestrator
 from agents.routing import ROUTE_LABELS
 from rag_core.config import DATA_DIR, DB_DIR, FACULTY_SOURCE_NAME, MIN_COHORT, TOP_K
+from rag_core.confusion import DEFAULT_WEIGHTS, SIGNALS, concept_key, load_and_compute, rank_stability
 from rag_core.embeddings import get_embeddings
 from rag_core.insights import cluster_questions, slide_label, summarize_clusters
 from rag_core.item_analysis import (
@@ -1047,6 +1048,91 @@ def _render_class_insight() -> None:
         st.bar_chart(dict(slide_counts.most_common(8)))
 
 
+def _signal_detail(signal, class_means) -> str:
+    if signal.value is not None:
+        return signal.evidence
+    if signal.name in class_means:
+        return f"class average used ({class_means[signal.name]:.0%})"
+    return "no data for this signal anywhere in the class"
+
+
+def _render_concept_confusion() -> None:
+    """Which concepts to revisit first: several kinds of evidence combined, shown with that evidence."""
+    st.caption(
+        "A concept is a slide topic. Many questions about it do not by themselves mean students are confused, so "
+        "this combines several kinds of evidence: how many students asked, whether they came back or asked to have "
+        "it explained, how they did on the class quiz, oral checks, and whether it kept coming up across days. "
+        "It is a ranking aid for deciding what to revisit first, not a measurement of understanding."
+    )
+    with st.expander("How much each kind of evidence counts"):
+        st.caption("Starting values are judgment calls. Change them and watch the ranking and its stability.")
+        weights = {
+            name: st.slider(label, 0, 100, round(DEFAULT_WEIGHTS[name] * 100), key=f"weight_{name}")
+            for name, (label, _w) in SIGNALS.items()
+        }
+    report = load_and_compute(DB_DIR, {name: v / 100 for name, v in weights.items()})
+    if not report.concepts:
+        st.info(
+            "Not enough data yet. A concept needs at least one kind of evidence from enough different students "
+            f"(at least {MIN_COHORT}) or enough questions."
+        )
+    else:
+        stability = rank_stability(report)
+        st.dataframe(
+            [
+                {
+                    "Rank": rank,
+                    "Concept": c.concept,
+                    "Confusion score": round(c.score),
+                    "Confidence": c.confidence,
+                    "Stays in top 3 when weights change": f"{stability[c.key].top_share:.0%}",
+                    "What stands out": c.stands_out or "Nothing above the class average",
+                }
+                for rank, c in enumerate(report.concepts, start=1)
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+        st.caption(
+            "Confidence: Low means one kind of evidence backs the score, Medium two, High three (questions, quizzes, "
+            "oral checks). A signal with too little data is filled in with the class average, so missing data never "
+            "lowers or raises a concept's score on its own."
+        )
+
+        quizzes = list_quizzes(SCOPE_CLASS, DB_DIR)
+        found = likely_misconceptions(analyze_quizzes(quizzes, list_attempts(db_dir=DB_DIR)))
+        for rank, c in enumerate(report.concepts, start=1):
+            with st.expander(f"{rank}. {c.concept} (score {round(c.score)}, {c.confidence.lower()} confidence)"):
+                st.dataframe(
+                    [
+                        {
+                            "Evidence": s.label,
+                            "Weight": f"{s.weight:.0%}",
+                            "Reading": f"{s.value:.0%}" if s.value is not None else "Not enough data",
+                            "Detail": _signal_detail(s, report.means),
+                        }
+                        for s in c.signals
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
+                for q in (m for m in found if concept_key(m.topic) == c.key):
+                    wrong = q.misconception
+                    st.markdown(
+                        f"Quiz finding: {wrong.share:.0%} of the class chose \"{wrong.text}\" instead of "
+                        f"\"{q.correct_option.text}\" on \"{q.question}\"."
+                    )
+    if report.unscored:
+        st.caption(
+            "Asked about but too little evidence to score: "
+            + "; ".join(f"{name} ({n})" for name, n in report.unscored[:10])
+        )
+    st.caption(
+        f"Based on {report.active_students} identified student(s). Questions the notes could not answer have no slide, "
+        "so they are in Pending Gaps instead. Slides on the same idea are not merged yet."
+    )
+
+
 def _render_pending_gaps() -> None:
     gaps = list_queries(status=STATUS_GAP, db_dir=DB_DIR)
     if not gaps:
@@ -1257,9 +1343,11 @@ def _render_course_material() -> None:
 
 def render_professor() -> None:
     st.title("Faculty Dashboard")
-    tab_insight, tab_gaps, tab_quizzes, tab_notes, tab_material = st.tabs(
-        ["Class Insight", "Pending Gaps", "Class Quizzes", "Study Notes", "Course Material"]
+    tab_concepts, tab_insight, tab_gaps, tab_quizzes, tab_notes, tab_material = st.tabs(
+        ["Concepts to Revisit", "Class Insight", "Pending Gaps", "Class Quizzes", "Study Notes", "Course Material"]
     )
+    with tab_concepts:
+        _render_concept_confusion()
     with tab_insight:
         _render_class_insight()
     with tab_gaps:

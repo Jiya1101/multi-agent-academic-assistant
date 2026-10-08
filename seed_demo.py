@@ -13,6 +13,7 @@ Usage:
     python seed_demo.py           # add the simulated class (replaces any earlier demo rows)
     python seed_demo.py --clear   # remove all simulated rows
     python seed_demo.py --quiz-attempts   # also simulate 24 students taking the published class quizzes
+    python seed_demo.py --class-activity  # also simulate 24 students asking questions over several days
 """
 
 import argparse
@@ -117,6 +118,50 @@ DEMO_CLASS_SIZE = 24
 PLANTED = ("ordinary", "ordinary", "misconception", "easy", "ordinary", "faulty key")
 
 
+# Simulated class questions (--class-activity): topic -> (students who ask, chance of a follow-up, chance a request
+# is "explain this to me", days it is spread over). ACID/BASE and RDS are planted as confusing (students come
+# back, ask for explanations, over several days); OLTP vs OLAP is planted as merely popular (many students,
+# asked once, on one day).
+ACTIVITY_PLAN = {
+    "ACID vs BASE": (14, 0.60, 0.35, 5),
+    "RDS Multi-AZ vs read replicas": (12, 0.50, 0.30, 4),
+    "OLTP vs OLAP": (16, 0.05, 0.05, 1),
+    "Spark fault tolerance": (9, 0.15, 0.10, 2),
+    "Spark on YARN": (7, 0.20, 0.10, 2),
+}
+
+
+def simulate_class_activity(vectorstore, seed: int = 5) -> int:
+    """Have the simulated students ask questions, with sessions, follow-ups and explanation requests."""
+    rng = random.Random(seed)
+    start = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0) - timedelta(days=7)
+    added = 0
+
+    def ask(question, student, session, when, agent):
+        nonlocal added
+        retrieval = retrieve(question, vectorstore)
+        log_query(
+            question=question, grounded=retrieval.relevant, top_score=retrieval.top_score,
+            source_documents=retrieval.chunks, scope=[DEMO_MARKER], db_dir=DB_DIR, student_id=student,
+            agent=agent, session_id=session, asked_at=when.isoformat(timespec="seconds"),
+        )
+        added += 1
+
+    for topic, (n_students, follow_p, explain_p, days) in ACTIVITY_PLAN.items():
+        pool = SIMULATED_QUESTIONS[topic]
+        for index in rng.sample(range(DEMO_CLASS_SIZE), min(n_students, DEMO_CLASS_SIZE)):
+            student = f"{DEMO_CLASS_PREFIX}{index + 1:02d}"
+            day = rng.randrange(days)
+            when = start + timedelta(days=day, minutes=rng.randrange(0, 240))
+            session = f"{student}-day{day}"
+            kind = lambda: "Concept Explainer" if rng.random() < explain_p else "Doubt Resolver"
+            ask(rng.choice(pool), student, session, when, kind())
+            if rng.random() < follow_p:
+                ask(rng.choice(pool), student, session, when + timedelta(minutes=3), kind())
+    print(f"Simulated {added} question(s) from the simulated class (with sessions, follow-ups and explanation requests).")
+    return added
+
+
 def simulate_class(quizzes, size: int = DEMO_CLASS_SIZE, seed: int = 11):
     """
     Simulate `size` students taking every quiz in `quizzes` (no database involved).
@@ -184,6 +229,8 @@ def main() -> None:
     parser.add_argument("--clear", action="store_true", help="Remove all simulated rows and exit.")
     parser.add_argument("--quiz-attempts", action="store_true",
                         help="Also simulate students taking the published class quizzes (run publish_quizzes.py first).")
+    parser.add_argument("--class-activity", action="store_true",
+                        help="Also simulate 24 students asking questions over several days (feeds Concept Confusion).")
     args = parser.parse_args()
 
     removed = delete_by_scope_marker(DEMO_MARKER, DB_DIR)
@@ -234,6 +281,8 @@ def main() -> None:
             asked_at=(sitting + timedelta(minutes=4 * number)).isoformat(timespec="seconds"),
         )
     print(f"Added {len(DEMO_STUDENT_QUESTIONS)} question(s) for student '{DEMO_STUDENT}'.")
+    if args.class_activity:
+        simulate_class_activity(vectorstore)
     if args.quiz_attempts:
         simulate_quiz_attempts()
 
