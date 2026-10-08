@@ -17,13 +17,13 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from agents.base import Agent, AgentContext, AgentResult
-from agents.note_generator import major_headings
+from agents.note_generator import group_material, major_headings
 from rag_core.audio_metrics import analyze_audio_response
 from rag_core.chain import NOT_COVERED_MESSAGE, format_context, format_type_definitions, retrieve, type_definitions
 from rag_core.config import FACULTY_SOURCE_NAME
 from rag_core.insights import topic_title
 from rag_core.llm import get_json_llm
-from rag_core.normalize import is_title_like, readable_sentences
+from rag_core.normalize import bullet_points, human_title, is_title_like, readable_sentences
 from rag_core.oral_assessment import (
     infer_understanding_level,
     record_oral_assessment,
@@ -138,6 +138,30 @@ def _selected_chunks(ctx: AgentContext, limit: int = 4, exclude_topics=(), rng: 
         starts = [i for i, d in enumerate(chunks) if is_title_like(d.metadata.get("section") or "")] or list(range(len(chunks)))
     start = rng.choice(starts)
     return chunks[start:start + limit]
+
+
+MAX_MODEL_POINTS = 6        # a model answer for a 30 to 60 second spoken reply
+
+
+def _bullet_headings(ctx: AgentContext, min_points: int = 3) -> list:
+    """Headings with enough bullet points under them to ask about (same shape as `major_headings`)."""
+    out = []
+    for group in group_material(ctx):
+        if not group["title"]:
+            continue
+        points = bullet_points(group["text"], group["section"])
+        if len(points) >= min_points:
+            out.append({
+                "heading": human_title(group["title"]), "sentences": points, "bullets": True,
+                "file": group["file"], "pages": group["pages"], "text": group["text"],
+            })
+    return out
+
+
+NO_HEADING_MESSAGE = (
+    "There is nothing in the selected material to ask an oral question about yet: no heading has enough readable "
+    "text under it. Choose other material, or use the Ask or Quiz tab for this file."
+)
 
 
 def _best_answer(context: str, topic: str, question: str, ctx: AgentContext) -> str:
@@ -317,14 +341,14 @@ class OralAssessor(Agent):
     ) -> AgentResult:
         """Ask about one of the material's major headings (the same ones the study notes use)."""
         rng = rng or random
-        headings = major_headings(ctx)
+        headings = major_headings(ctx) or _bullet_headings(ctx)   # a deck written as bullets has no full sentences
         if not headings:
             return AgentResult(
                 agent=self.name,
                 kind="oral_question",
                 grounded=False,
-                text=NOT_COVERED_MESSAGE,
-                data={"topic": "Selected material", "error": "not_covered"},
+                text=NO_HEADING_MESSAGE,
+                data={"topic": "Selected material", "error": "no_headings"},
             )
         asked = {t.lower() for t in exclude_topics}
         fresh = [h for h in headings if h["heading"].lower() not in asked] or headings  # all asked: start over
@@ -341,7 +365,13 @@ class OralAssessor(Agent):
         if not question:
             question = _fallback_question(topic, rng)
         types = type_definitions(topic, ctx.vectorstore, ctx.source_filenames)
-        best = "\n".join(format_type_definitions(types)) if types else "\n".join(f"- {s}" for s in chosen["sentences"])
+        points = chosen["sentences"]
+        if chosen.get("bullets") and len(points) > MAX_MODEL_POINTS:
+            # A bullet slide can hold dozens of points under one heading: keep those closest to the question.
+            terms = set(_content_terms(f"{question} {topic}"))
+            keep = sorted(range(len(points)), key=lambda i: (-len(terms & set(_content_terms(points[i]))), i))
+            points = [points[i] for i in sorted(keep[:MAX_MODEL_POINTS])]
+        best = "\n".join(format_type_definitions(types)) if types else "\n".join(f"- {s}" for s in points)
         return AgentResult(
             agent=self.name,
             kind="oral_question",

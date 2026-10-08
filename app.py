@@ -1481,8 +1481,8 @@ def _render_course_material() -> None:
 
 def render_professor() -> None:
     st.title("Faculty Dashboard")
-    tab_concepts, tab_insight, tab_gaps, tab_quizzes, tab_notes, tab_material = st.tabs(
-        ["Concepts to Revisit", "Class Insight", "Pending Gaps", "Class Quizzes", "Study Notes", "Course Material"]
+    tab_concepts, tab_insight, tab_gaps, tab_quizzes, tab_material = st.tabs(
+        ["Concepts to Revisit", "Class Insight", "Pending Gaps", "Class Quizzes", "Course Material"]
     )
     with tab_concepts:
         _render_concept_confusion()
@@ -1492,12 +1492,6 @@ def render_professor() -> None:
         _render_pending_gaps()
     with tab_quizzes:
         _render_class_quizzes()
-    with tab_notes:
-        vectorstore = _get_vectorstore()
-        if vectorstore is None:
-            st.info("Build the index first (Course Material tab).")
-        else:
-            render_notes_builder(vectorstore, None, "prof")
     with tab_material:
         _render_course_material()
 

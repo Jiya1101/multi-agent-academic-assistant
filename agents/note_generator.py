@@ -30,7 +30,7 @@ from rag_core.chain import NOT_COVERED_MESSAGE, STOPWORDS as _STOPWORDS, format_
 from rag_core.config import FACULTY_SOURCE_NAME
 from rag_core.insights import topic_title
 from rag_core.llm import get_json_llm
-from rag_core.normalize import human_title, is_title_like, readable_sentences
+from rag_core.normalize import bullet_points, human_title, is_title_like, readable_sentences
 from rag_core.query_log import log_query
 
 NO_EXAMPLE = "The notes do not give an example."
@@ -360,6 +360,8 @@ class NoteGenerator(Agent):
             if on_progress:
                 on_progress(done, total, group["file"])
             sentences = readable_sentences(group["text"], max_len=240, drop_prefix=group["section"])
+            if not sentences:  # a deck written as terse bullets has no full sentences: read the bullets as points
+                sentences = bullet_points(group["text"], group["section"])
             if not sentences:
                 continue
             use_case = NO_EXAMPLE

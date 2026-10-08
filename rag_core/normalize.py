@@ -262,6 +262,51 @@ def is_title_like(section: str, numbered: bool = False) -> bool:
     return True
 
 
+# Bullet glyphs PDF slides use (black circle, white circle, bullet, small square, white bullet, black square,
+# triangular bullet), written as code points so this file stays plain ASCII.
+_BULLET_GLYPHS = "".join(chr(c) for c in (0x25CF, 0x25CB, 0x2022, 0x25AA, 0x25E6, 0x25A0, 0x2023))
+_BULLET_MARK = re.compile(r"\s*[" + _BULLET_GLYPHS + r"]\s*")
+_APOSTROPHE = chr(0x2019)
+_TRAILING_SUBHEADING = re.compile(
+    # "... 2. Failure Detectors", "... c) Ricart (Multicast + Clocks)"
+    r"\s+(?:\d{1,2}[.)]|[a-z]\))\s+[A-Z][A-Za-z&/,'" + _APOSTROPHE + r"() +-]{2,80}\.?$"
+)
+# A pictogram (the emoji and symbol blocks) and the label after it, e.g. a "Quick Revision" tag at the end of a slide.
+_TRAILING_ICON_LABEL = re.compile(
+    r"\s+[" + chr(0x1F300) + "-" + chr(0x1FAFF) + chr(0x2600) + "-" + chr(0x27BF) + r"].*$"
+)
+
+
+def bullet_points(text: str, drop_prefix: str = "") -> list[str]:
+    """
+    Slide text written as terse bullets ("Pros: simple, easy.", "Token circulates -> only the holder enters.")
+    as a list of short points.
+
+    `readable_sentences` rejects these on purpose (fragments, arrows), so a deck that is all bullets gave the
+    oral check and the whole-material notes nothing to work with. This reads them as points instead. Whatever
+    comes before the first bullet is only headings and is skipped, and a sub-heading or icon label glued to the
+    end of a bullet is removed. Text with no bullet glyphs gives an empty list, so prose decks are unaffected.
+    """
+    text = " ".join(re.sub(r"\[Chunk[^\]]*\]", " ", text or "").split())
+    prefix = " ".join((drop_prefix or "").split())
+    if prefix and text.lower().startswith(prefix.lower()):
+        text = text[len(prefix):]
+    points: list[str] = []
+    seen = set()
+    for segment in _BULLET_MARK.split(text)[1:]:
+        segment = _TRAILING_ICON_LABEL.sub("", segment)
+        segment = _TRAILING_SUBHEADING.sub("", segment).strip(" .;:-" + chr(0x2013))
+        if len(segment.split()) < 3 or len(segment) < 15:
+            continue
+        if len(segment) > 240:
+            segment = segment[:240].rsplit(" ", 1)[0]
+        point = segment[0].upper() + segment[1:] + "."
+        if point.lower()[:60] not in seen:
+            seen.add(point.lower()[:60])
+            points.append(point)
+    return points
+
+
 def chunk_sentences(doc, min_len: int = 35, max_len: int = 200) -> list[str]:
     """`readable_sentences` of one chunk, with its slide heading removed from the front."""
     section = doc.metadata.get("section") or ""

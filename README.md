@@ -34,7 +34,7 @@ Built as a B.Tech project: *Multi-Agent AI Framework for Personalized Academic A
 - **Class Quizzes**: quizzes on the topics the class keeps asking about, with aggregated (anonymous) results,
   plus a **Question analysis** that shows the wrong answers many students chose (likely misconceptions) and
   flags weak quiz questions. Numbers appear only once at least 5 students have taken a quiz.
-- **Study Notes** and **Course Material** (upload PDFs, rebuild the index).
+- **Course Material** (upload PDFs, rebuild the index).
 
 ## The agents
 

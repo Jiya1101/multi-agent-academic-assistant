@@ -60,8 +60,7 @@ is kept as a safety net, not because the data shows it helps.
 
 ### Study notes as a PDF
 
-The **Study notes** tab (students) and **Study Notes** tab (professors, for
-handouts) generate notes for up to five topics at a time. Pick topics from
+The **Study notes** tab (students only) generates notes for up to five topics at a time. Pick topics from
 the slide titles in the uploaded files, or type your own, or just ask in chat:
 "make notes on ACID and BASE". Each topic becomes:
 
@@ -73,6 +72,21 @@ the slide titles in the uploaded files, or type your own, or just ask in chat:
 Notes come only from the uploaded material. A topic the material does not
 cover is skipped and reported as a gap for the professor, not written from the
 model's own knowledge.
+
+**Slide decks written as bullets.** The whole-material notes and the oral check
+first read a heading's text as full sentences. A deck made of terse bullets
+("Pros: simple, easy.", "Token circulates -> only the holder enters.") has almost
+none, so both used to find nothing (the oral check even said "not covered" about
+material it simply could not read as prose). When no sentences are found, the
+bullets are now read as points (`bullet_points` in `rag_core/normalize.py`):
+text before the first bullet is skipped as headings, sub-headings and icon
+labels glued to the end of a bullet are removed, and text with no bullet glyphs
+is left to the sentence reader, so prose decks behave as before. For the oral
+check the model answer is capped at 6 points, the ones sharing most words with
+the question. That ranking is plain word overlap, so a loosely related point can
+slip in; treat the model answer as a guide. Found and fixed on a real
+terse-bullet file (`MUTUAL EXCLUSION.pdf`): the oral check now writes a question
+in 10 to 30 seconds and the notes give 2 sections instead of 0.
 
 Checks on what the model writes (it is a small local model and does drift):
 output must be valid JSON in the expected shape (one retry); key points that
