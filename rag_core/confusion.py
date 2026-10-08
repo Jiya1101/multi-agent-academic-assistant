@@ -199,6 +199,10 @@ def _score(signals: Sequence[Signal], means: Dict[str, float], weights: Dict[str
     return 100.0 * acc / total
 
 
+score_signals = _score              # public names for other modules (rag_core/intervention.py)
+normalise_weights = _normalised
+
+
 def compute_confusion(
     rows: Sequence[Dict[str, Any]],
     quizzes: Iterable[Dict[str, Any]] = (),

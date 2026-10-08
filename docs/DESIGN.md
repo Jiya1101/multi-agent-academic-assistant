@@ -316,6 +316,71 @@ relation; a concept is one slide topic, so a quiz about BASE can end up under th
 whether an approved action helped (that needs real students before and after); and there is no way to edit a
 published remedial quiz.
 
+### Did it help? (professor)
+
+`rag_core/intervention.py` closes the loop: for every approved clarification note, published remedial quiz, or action
+the professor logs by hand (re-taught it in class, updated a slide), it compares the topic's confusion score before and
+after, on the **Concepts to Revisit** tab. Subtracting the two scores is not enough, because a topic's score can fall for
+reasons unrelated to what the professor did (the unit winds down, students get used to the material, an exam gets
+close). The comparison is built to avoid those traps:
+
+- **Equal windows.** The same number of days on each side of the action (at most 14), so signals that grow with time
+  (different students asking, different days) are not biased towards the longer side.
+- **Untouched topics as a yardstick.** The same before/after change is computed for other topics, and the reported
+  effect is the topic's change minus their typical change. Anything that moved the whole class cancels out. Topics that
+  were themselves acted on in the same period are left out.
+- **Only similar topics count as the yardstick** (they must have started within 15 points of the topic acted on), and at
+  least two are needed. See the flaw below.
+- **Like with like.** Only evidence available on both sides is compared (at least two signals), for the topic and for the
+  yardstick, so a quiz taken only after the action cannot fake a change. If only question behaviour could be compared,
+  the result says so, because a clarification answers questions directly and so changes that behaviour by itself.
+- **First attempts over all time.** A retake of an old quiz after the action is not new evidence.
+- **A range, not a number.** Students are resampled 150 times; the page shows a 90% range, and a change is claimed only
+  if the whole range is on one side of zero.
+- **Waiting is an answer.** Right after an action there is nothing to compare, and the page says "too early to tell".
+
+**A flaw this evaluation found in the first version.** The first version compared the topic with *every* untouched
+topic. In a simulated class where the action did nothing but everything drifted down, it still claimed success in 83%
+of 6 classes (a small smoke test). The reason is that professors act on the topics that score highest, and high scores
+tend to fall back by themselves (regression to the mean) while low-scoring topics barely move, so the low-scoring
+untouched topics were an unfair yardstick. The fix is the "similar topics only" rule above. It has a cost, stated
+below.
+
+**Evaluation.** `python evaluate_intervention.py` simulates two-week classes of 48 with 8 topics (4 planted as confusing,
+1 as merely popular), an action on one confusing topic on day 8, and a chosen real effect and class-wide drift. Share of
+30 classes in which each check claimed "the action helped":
+
+| Real effect of the action | Everything also drifts down? | Naive before/after | Against similar topics | Against similar topics, with range (the app) |
+|---|---|---|---|---|
+| none | no | 20% | 20% | 10% |
+| moderate | no | 97% | 90% | 67% |
+| strong | no | 100% | 100% | 97% |
+| none | yes | **73%** | 20% | **0%** |
+| moderate | yes | 93% | 60% | 23% |
+| strong | yes | 100% | 87% | 63% |
+
+What this shows, and what it does not:
+
+- With drift and no real effect, the naive subtraction claims success 73% of the time; the app never did in these 30
+  classes. That is the reason for the design.
+- The price is power. When the action works only moderately and the whole class is also drifting down, the app claims
+  success in 23% of classes (the naive check 93%, but mostly by crediting the drift). A real but modest effect will
+  often come back as "no clear difference".
+- With 30 classes per row, each percentage is uncertain by roughly 9 points either way. The 10% false-claim rate with no
+  drift is consistent with the 5% a one-sided 90% range should give, but this sample cannot tell the two apart.
+- The students come from a model we wrote, with a drift and an effect we chose. This shows how the checks behave under
+  those assumptions, not that a real action has any effect.
+- The simulation always had four comparable confusing topics. A real course with few topics will often have fewer than
+  two similar ones, and the answer will then be "cannot tell". That is intended, but it means the feature is most useful
+  in a larger course.
+- Even a clean result cannot prove the action caused the change. The wording is "consistent with", never "caused by".
+
+How it was tested: 31 unit tests on hand-built classes (a real improvement; a fall shared by every topic; high topics
+falling by themselves while low ones stay flat; too little data; no yardstick; one-sided signals; retakes; resampling;
+the log), with six deliberate breaks of the method's safeguards, all caught. The dashboard section was rendered on a
+temporary database holding a simulated class where the action worked (score 76 to 50, similar topics -4, difference
+-22, 90% range -36 to -10), and the log-an-action form was exercised, with the real database untouched.
+
 ### Hand-offs between agents
 
 - **Doubt Resolver / Concept Explainer / Note Generator -> Gap Handler**: the

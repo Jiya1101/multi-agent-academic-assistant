@@ -122,12 +122,14 @@ def record_attempt(
     total: int,
     answers: List[Optional[int]],
     db_dir: str | Path = DB_DIR,
+    taken_at: Optional[str] = None,
 ) -> int:
+    """Save one quiz attempt. `taken_at` (ISO, UTC) is only for tests and demo seeding."""
     with closing(_connect(db_dir)) as conn, conn:
         cursor = conn.execute(
             "INSERT INTO attempts (taken_at, student_id, quiz_id, topic, correct, total, answers) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (_now(), student_id, quiz_id, topic, correct, total, json.dumps(answers)),
+            (taken_at or _now(), student_id, quiz_id, topic, correct, total, json.dumps(answers)),
         )
         return int(cursor.lastrowid)
 

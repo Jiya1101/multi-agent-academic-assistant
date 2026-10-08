@@ -28,7 +28,9 @@ Built as a B.Tech project: *Multi-Agent AI Framework for Personalized Academic A
   ranking changes if the weights change. Many questions alone do not rank a topic high. Under the ranking, the
   **Content Advisor** suggests what to do about the top topics (rule-based, citing its evidence) and can draft a
   clarification note or a remedial quiz with the local model. Drafts stay hidden from students until the professor
-  reads, edits and approves them.
+  reads, edits and approves them. **Did it help?** then compares each approved action (or one you log by hand,
+  such as re-teaching in class) with what happened to other topics at a similar level over the same days, with an
+  uncertainty range, and says "too early to tell" or "cannot tell" when the data does not support a claim.
 - **Class Insight**: student questions grouped by meaning, with the slides students keep landing on.
 - **Pending Gaps**: questions the notes could not answer. One answer is added to the course material for everyone.
 - **Class Quizzes**: quizzes on the topics the class keeps asking about, with aggregated (anonymous) results,
@@ -188,6 +190,7 @@ publish_quizzes.py       Pre-generate class quizzes from the command line
 evaluate_router.py       Measure the router (rules vs learned vs hybrid)
 evaluate_item_analysis.py  Check the quiz question analysis against simulated classes with known problems
 evaluate_confusion.py    Check the confusion score against simulated classes with known confusing topics
+evaluate_intervention.py Check the "did it help" comparison against simulated classes where the action works or does nothing
 download_speech_model.py One-time download of the Whisper model
 agents/                  The multi-agent layer (agents, orchestrator, router)
 rag_core/                Shared retrieval layer (loading, search, LLM, PDF export, speech)
@@ -209,6 +212,7 @@ Measured on this project's own data; full details and caveats are in [docs/DESIG
 | Study notes (real Llama 3, 2 topics) | right structure every time; unsupported details are dropped or flagged for checking |
 | Quiz question analysis, 200 simulated classes of 24 | planted shared mistakes found 92% of the time, wrongly reported on ordinary questions 0.04 times per class; faulty answer keys found only 35% of the time (97% with 100 students) |
 | Concept confusion score, 200 simulated classes of 24 (2 of 8 topics planted as confusing, 1 as merely popular) | picks the confusing topics 82 to 100% of the time depending on how strongly confusion shows in behaviour; ranking by number of questions manages 50 to 69% (chance is about 25%) because it picks the popular topic |
+| "Did it help?" check, 30 simulated classes of 48 per setting | when the action does nothing but every topic drifts down anyway, a plain before/after subtraction claims success 73% of the time and the app 0%; when the action really works moderately it is detected 67% of the time (23% if the whole class is also drifting down), so modest real effects are often reported as "no clear difference" |
 | Tests | unit tests for every module (command above) |
 
 These come with real caveats: the router examples and the test recordings were made by the project authors

@@ -9,6 +9,7 @@ measured.
 Kinds:
   clarification   a short note for students on a concept; once approved it is added to the course index
   remedial_quiz   a quiz on a concept; `ref` is the quiz id, and it is hidden from students until approved
+  action          something done outside the app (re-taught in class, updated a slide), logged by hand
 """
 
 import sqlite3
@@ -21,6 +22,7 @@ from rag_core.config import DB_DIR, QUERY_LOG_FILENAME
 
 KIND_CLARIFICATION = "clarification"
 KIND_REMEDIAL_QUIZ = "remedial_quiz"
+KIND_ACTION = "action"      # something the professor did outside the app, logged by hand
 
 STATUS_DRAFT = "draft"
 STATUS_APPROVED = "approved"
@@ -106,6 +108,32 @@ def set_status(advice_id: int, status: str, db_dir: str | Path = DB_DIR) -> None
     decided = _now() if status in (STATUS_APPROVED, STATUS_DISMISSED) else None
     with closing(_connect(db_dir)) as conn, conn:
         conn.execute("UPDATE advice SET status = ?, decided_at = ? WHERE id = ?", (status, decided, advice_id))
+
+
+def log_action(
+    concept_key: str,
+    concept: str,
+    note: str,
+    when: Optional[str] = None,
+    db_dir: str | Path = DB_DIR,
+) -> int:
+    """
+    Record something the professor did outside the app (re-taught it in class, updated a slide) so its effect can
+    be measured like any other action. `when` is an ISO UTC time (default: now). It is saved as already approved.
+    """
+    item = add_advice(concept_key, concept, KIND_ACTION, note, body=note, db_dir=db_dir)
+    with closing(_connect(db_dir)) as conn, conn:
+        conn.execute(
+            "UPDATE advice SET status = ?, decided_at = ? WHERE id = ?", (STATUS_APPROVED, when or _now(), item)
+        )
+    return item
+
+
+def delete_by_title_prefix(prefix: str, db_dir: str | Path = DB_DIR) -> int:
+    """Delete items whose title starts with `prefix` (used to clear simulated demo actions)."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    with closing(_connect(db_dir)) as conn, conn:
+        return conn.execute("DELETE FROM advice WHERE title LIKE ? ESCAPE '\\'", (escaped + "%",)).rowcount
 
 
 def approved_clarifications(db_dir: str | Path = DB_DIR) -> List[Tuple[str, str]]:

@@ -28,6 +28,7 @@ import hashlib
 import re
 import uuid
 from collections import Counter, defaultdict
+from datetime import datetime, time, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -44,6 +45,7 @@ from rag_core.advice_log import (
     add_advice,
     approved_clarifications,
     list_advice,
+    log_action,
     set_status as set_advice_status,
     update_body as update_advice_body,
 )
@@ -68,6 +70,7 @@ from rag_core.learning_log import (
     record_route_feedback,
     set_quiz_scope,
 )
+from rag_core.intervention import measure_all
 from rag_core.library import delete_material
 from rag_core.loader import load_all_pdfs
 from rag_core.normalize import human_title, short_section_title
@@ -1184,6 +1187,88 @@ def _render_advice_actions(a, vectorstore) -> None:
                 st.rerun()
 
 
+@st.cache_data(show_spinner=False)
+def _measured_effects(fingerprint, weights_key):
+    """Every approved action's before/after result. Cached: each one re-scores the class many times."""
+    return measure_all(DB_DIR, weights=dict(weights_key))
+
+
+def _data_fingerprint():
+    """Changes whenever there is new data to measure (or the hour turns, since 'now' is the end of the after-window)."""
+    return (
+        len(list_queries(db_dir=DB_DIR)), len(list_attempts(db_dir=DB_DIR)), len(list_oral_assessments(db_dir=DB_DIR)),
+        len(list_advice(status=STATUS_APPROVED, db_dir=DB_DIR)), datetime.now().strftime("%Y-%m-%d %H"),
+    )
+
+
+def _action_label(iv) -> str:
+    return {
+        KIND_CLARIFICATION: "Clarification note approved",
+        KIND_REMEDIAL_QUIZ: "Remedial quiz published",
+    }.get(iv.kind, f"You logged: {iv.title}")
+
+
+def _render_effect(effect) -> None:
+    iv = effect.intervention
+    with st.container(border=True):
+        st.markdown(f"**{iv.concept}**: {_action_label(iv)} on {iv.at:%d %b %Y}")
+        if effect.status == "waiting":
+            st.info(effect.message)
+            return
+        low, high = effect.interval if effect.interval else (None, None)
+        if effect.relative is None:
+            st.info(f"{effect.verdict}. {effect.message}")
+        else:
+            body = (
+                f"Score {effect.before:.0f} to {effect.after:.0f} ({effect.change:+.0f}). Untouched topics at a similar "
+                f"level ({effect.n_controls}) changed by {effect.control_change:+.0f} over the same days, so the "
+                f"difference is {effect.relative:+.0f}"
+                + (f" (90% range {low:+.0f} to {high:+.0f})." if effect.interval else ".")
+            )
+            show = {"Fell more than other topics": st.success, "Rose more than other topics": st.warning}.get(
+                effect.verdict, st.info
+            )
+            show(f"**{effect.verdict}.** {body} {effect.message}")
+        st.caption(
+            f"Compared {effect.window_days:.0f} day(s) before with {effect.window_days:.0f} day(s) after, using only "
+            f"evidence that exists on both sides ({', '.join(effect.evidence_kinds)})."
+        )
+        st.dataframe(
+            [{"Evidence": c.label, "Before": c.before, "After": c.after} for c in effect.signal_changes],
+            hide_index=True,
+            width="stretch",
+        )
+
+
+def _render_effects(report, weights) -> None:
+    """Did the things the professor did actually move the score? Compared against untouched topics, with a range."""
+    st.subheader("Did it help?")
+    st.caption(
+        "For every clarification note you approved, remedial quiz you published, or action you log here, this compares "
+        "the topic's score before and after, against other topics that started at a similar level, so that anything "
+        "that changed the whole class does not count as your doing. Right after an action there is nothing to compare "
+        "yet. A result is suggestive, never proof: students and lectures change too."
+    )
+    with st.expander("Log something you did outside the app (for example, re-taught it in class)"):
+        names = {c.concept: c for c in report.concepts}
+        topic = st.selectbox("Topic", list(names), key="action_topic")
+        note = st.text_input("What did you do?", placeholder="Re-taught it with a worked example", key="action_note")
+        day = st.date_input("When", value=datetime.now().date(), key="action_date")
+        if st.button("Save", key="action_save"):
+            if not note.strip():
+                st.warning("Say what you did first.")
+            else:
+                when = datetime.combine(day, time(9, 0), tzinfo=timezone.utc).isoformat(timespec="seconds")
+                log_action(names[topic].key, topic, note.strip(), when, DB_DIR)
+                st.toast("Saved. It will be measured once there is data after that date.")
+                st.rerun()
+    effects = _measured_effects(_data_fingerprint(), tuple(sorted(weights.items())))
+    if not effects:
+        st.info("Nothing to measure yet. Approve a clarification note or remedial quiz above, or log an action.")
+    for effect in effects:
+        _render_effect(effect)
+
+
 def _signal_detail(signal, class_means) -> str:
     if signal.value is not None:
         return signal.evidence
@@ -1260,6 +1345,7 @@ def _render_concept_confusion() -> None:
                     )
     if report.concepts:
         _render_advice({name: v / 100 for name, v in weights.items()})
+        _render_effects(report, {name: v / 100 for name, v in weights.items()})
     if report.unscored:
         st.caption(
             "Asked about but too little evidence to score: "
