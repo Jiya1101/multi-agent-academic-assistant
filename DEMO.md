@@ -22,9 +22,10 @@ Llama 3 runs on CPU here: a live answer takes about a minute and a quiz about
 ## The pitch (30 seconds)
 
 "Most study assistants are one chatbot that only helps the student. We built
-seven agents with different jobs, and an orchestrator that routes between them
+nine agents with different jobs, and an orchestrator that routes between them
 and hands work from one to another. The same system serves the professor: it
-shows where the class is confused, turns that into quizzes, and turns
+shows where the class is confused, suggests what to change about it, turns that
+into quizzes and clarification notes the professor approves, and turns
 questions the notes cannot answer into new course content."
 
 ## 1. Student: a grounded answer (1.5 min)

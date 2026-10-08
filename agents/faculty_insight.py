@@ -29,6 +29,10 @@ class FacultyInsight(Agent):
     name = "Faculty Insight"
     job = "Cluster the class's questions and find topics the class keeps asking about."
 
+    def concept_report(self, ctx: AgentContext, weights=None):
+        """Score every concept from all the evidence (no embeddings needed). The Content Advisor builds on this."""
+        return load_and_compute(ctx.db_dir, weights)
+
     def run(
         self,
         request: str,

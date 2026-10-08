@@ -18,8 +18,9 @@ from rag_core.config import DATA_DIR, DB_DIR
 from rag_core.loader import load_all_pdfs
 from rag_core.splitter import split_documents
 from rag_core.embeddings import get_embeddings
+from rag_core.advice_log import approved_clarifications
 from rag_core.query_log import resolved_answers
-from rag_core.vectorstore import build_vectorstore, faculty_documents, save_vectorstore
+from rag_core.vectorstore import build_vectorstore, clarification_documents, faculty_documents, save_vectorstore
 
 
 def main() -> None:
@@ -50,7 +51,9 @@ def main() -> None:
 
     # Professor-written answers live in the question log, not in the PDFs, so
     # a rebuild must re-add them or they would silently disappear.
-    faculty_docs = faculty_documents(resolved_answers(args.db_dir))
+    faculty_docs = faculty_documents(resolved_answers(args.db_dir)) + clarification_documents(
+        approved_clarifications(args.db_dir)
+    )
     if faculty_docs:
         print(f"      Re-adding {len(faculty_docs)} professor answer(s) from the log.")
         chunks = chunks + faculty_docs

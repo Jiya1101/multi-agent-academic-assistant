@@ -12,6 +12,8 @@ Hand-offs implemented here (each is recorded in the returned `trace`):
   Progress Tracker -> Quiz Generator                      "quiz me" with no topic
   Progress Tracker -> Concept Explainer                   "what should I study next"
   Faculty Insight  -> Quiz Generator                      class quiz from class confusion
+  Faculty Insight  -> Content Advisor                     what to change for the hardest concepts
+  Content Advisor  -> Quiz Generator                      a draft remedial quiz, hidden until approved
 """
 
 from dataclasses import dataclass
@@ -19,6 +21,7 @@ from typing import List
 
 from agents.base import AgentContext, AgentResult
 from agents.concept_explainer import ConceptExplainer
+from agents.content_advisor import ContentAdvisor
 from agents.doubt_resolver import DoubtResolver
 from agents.faculty_insight import FacultyInsight
 from agents.gap_handler import GapHandler
@@ -27,7 +30,7 @@ from agents.oral_assessor import OralAssessor
 from agents.progress_tracker import ProgressTracker
 from agents.quiz_generator import QuizGenerator
 from agents.routing import Route, default_router, route_message
-from rag_core.learning_log import SCOPE_CLASS, SCOPE_PERSONAL, list_quizzes
+from rag_core.learning_log import SCOPE_CLASS, SCOPE_DRAFT, SCOPE_PERSONAL, list_quizzes
 
 
 @dataclass
@@ -55,6 +58,7 @@ class Orchestrator:
         self.oral_assessor = OralAssessor()
         self.progress_tracker = ProgressTracker()
         self.faculty_insight = FacultyInsight()
+        self.content_advisor = ContentAdvisor()
         self.gap_handler = GapHandler()
 
     # ------------------------------------------------------------------ #
@@ -127,6 +131,35 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     # Professor pipeline                                                 #
     # ------------------------------------------------------------------ #
+    def advise_class(self, ctx: AgentContext, top_n: int = 3, weights=None) -> OrchestratorResult:
+        """Faculty Insight scores the concepts; the Content Advisor suggests what to change for the top ones."""
+        trace = ["Professor action: get suggestions for the concepts the class finds hardest"]
+        report = self.faculty_insight.concept_report(ctx, weights)
+        trace.append(f"Faculty Insight: scored {len(report.concepts)} concept(s) from questions, quizzes and oral checks")
+        if not report.concepts:
+            return OrchestratorResult(
+                Route("advise_class", "professor pipeline"),
+                [AgentResult(agent=self.content_advisor.name, kind="advice", grounded=False,
+                             text="Not enough evidence yet to suggest anything.", data={"advice": [], "report": report})],
+                trace,
+            )
+        advised = self.content_advisor.run("", ctx, top_n=top_n, report=report)
+        trace.append(f"Faculty Insight -> Content Advisor: suggestions for the top {len(advised.data['advice'])}")
+        return OrchestratorResult(Route("advise_class", "professor pipeline"), [advised], trace)
+
+    def remedial_quiz(self, advice, ctx: AgentContext, n_questions: int = 3) -> OrchestratorResult:
+        """
+        Content Advisor -> Quiz Generator: a quiz aimed at the concept's shared mistake (or the concept itself).
+        It is saved as a DRAFT, hidden from students until a professor publishes it.
+        """
+        trace = [f"Content Advisor -> Quiz Generator: remedial quiz for '{advice.concept}'"]
+        request = advice.misconceptions[0]["question"] if advice.misconceptions else advice.concept
+        result = self.quiz_generator.run(request, ctx, n_questions=n_questions, scope=SCOPE_DRAFT, topic=advice.concept)
+        trace.append("Quiz Generator: saved as a draft for the professor to review" if not result.data.get("error")
+                     else f"Quiz Generator: no quiz ({result.data['error']})")
+        return OrchestratorResult(Route("remedial_quiz", "professor pipeline"), [result], trace)
+
+
     def publish_class_quizzes(
         self, ctx: AgentContext, top_n: int = 3, n_questions: int = 3
     ) -> OrchestratorResult:

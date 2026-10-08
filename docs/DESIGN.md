@@ -13,6 +13,7 @@ For setup and everyday use, see the [README](../README.md); for a presentation s
 | Note Generator | Write heading-wise study notes (definition, key points, use case) as a downloadable PDF | retrieval, Llama 3 (JSON mode), PDF export |
 | Progress Tracker | Per-student strong/weak topics from questions and quiz scores | question log, quiz attempts (no LLM) |
 | Faculty Insight | Cluster the whole class's questions; find topics the class keeps asking about | embeddings, clustering, question log |
+| Content Advisor | Suggest what to change for the topics the class finds hardest; draft a clarification note | concept scores, quiz analysis, retrieval, Llama 3 (draft only), advice log |
 | Gap Handler | Queue a question the notes cannot answer for the professor; spot repeats | question log, embeddings |
 
 An **Orchestrator** routes each request (`agents/orchestrator.py`) and shows
@@ -244,6 +245,63 @@ Read this with care:
 - Nothing here has been compared with real exam results or a professor's own judgment. That comparison is what
   would turn a ranking aid into an evidence-backed measure.
 
+### Content Advisor (professor)
+
+Turns "the class is confused about X" into things a professor can do, in two separate steps.
+
+**1. Diagnosis: fixed rules, no language model** (`rag_core/advice.py`). For the top-scoring concepts, each rule
+fires only on stated evidence and names it:
+
+| Finding | Fires when |
+|---|---|
+| Check quiz question N | a quiz question that strong students tend to miss (the "check the answer key" flag): fix the question before re-teaching |
+| Many students share one mistake | a reported quiz misconception |
+| Students may be missing an earlier idea | another high-scoring concept sits earlier in the same file (a guess from slide order, and it says so) |
+| Students keep returning | follow-up or explanation signal of 50% or more, with the slide they land on |
+| Recognise but cannot explain | quiz miss rate 40% or less while 60% or more of oral checks are not yet strong |
+| Wording matches the slide poorly | average retrieval distance at or above 80% of the relevance cut-off, with the students' own phrasings |
+| Only one kind of evidence | confidence is Low: collect more before changing anything |
+
+It also lists what students actually ask (grouped by meaning) and which slides they land on.
+
+**2. Drafts: the local model, only when the professor asks.** A clarification note is written from the course
+material found by searching the concept AND the confusing quiz question (the question can be about a neighbouring
+idea), with the instruction naming the correct answer and the wrong one. Sentences with too little support in the
+material are dropped, sentences with two or more words absent from the material are flagged, citation markers and
+chatty openings are removed, and the professor's edits are re-checked each time the box is updated. A remedial quiz comes from the
+Quiz Generator through the Orchestrator (Faculty Insight -> Content Advisor -> Quiz Generator).
+
+**Nothing reaches students unapproved.** Drafts live in the advice log. A clarification enters the course index only
+when approved (and can be removed again); a remedial quiz is saved with a hidden "draft" scope until published.
+Approved clarifications are re-added on an index rebuild. An approved clarification is stored under the concept's
+own title, not a new heading: otherwise students' later questions would land under "Clarification" instead of the
+concept, and its confusion score would fall because of the relabelling and not because students understood more.
+Approval times are recorded so the effect of an action on the score can be measured later.
+
+How it was tested: 37 unit tests (each rule on a hand-built class, the advice log, the draft/publish gate, the
+index, the draft checks with a fake model, the Orchestrator hand-offs), deliberate breaks of six promises (five
+caught; the sixth was a redundant sort), and a scripted click-through of the real dashboard on a copy of the
+database. The language-model part was run three times on your real data with Llama 3, and the runs were not equally
+good, which is the reason for the approval step:
+
+- Run 1 (searched only the concept title): 169 seconds. It opened with "Here is a clarification ...", and explained
+  ACID while the class's mistake was about BASE, even repeating the wrong answer as if related. The support check
+  flagged 3 sentences.
+- Run 2 (after adding the quiz question to the search and removing chatter): 79 seconds, two generic sentences that
+  ignored the mistake entirely.
+- Run 3 (after putting the correct and wrong answers into the instruction itself): 38 seconds, on target. It explains
+  that BASE gives consistency eventually, contrasts it with ACID, and the check dropped 2 shaky sentences and flagged 1.
+
+Three runs on one concept is a very small sample, and each fix was made after seeing the previous output. The honest
+conclusion is that a small local model can produce a usable first draft when the instruction is specific, that it
+sometimes does not, and that the professor must read every draft. The lexical support check catches invented
+content words but not a fluent sentence that is wrong or beside the point (run 2 passed it).
+
+Limits: the rules are heuristics with thresholds we chose; "earlier in the file" is not a real prerequisite
+relation; a concept is one slide topic, so a quiz about BASE can end up under the ACID concept; nothing yet measures
+whether an approved action helped (that needs real students before and after); and there is no way to edit a
+published remedial quiz.
+
 ### Hand-offs between agents
 
 - **Doubt Resolver / Concept Explainer / Note Generator -> Gap Handler**: the
@@ -256,6 +314,9 @@ Read this with care:
 - **Faculty Insight -> Quiz Generator** (professor): topics the notes cover
   but many students keep asking about become published class quizzes. Quiz
   results then show the professor which topics need re-teaching.
+- **Faculty Insight -> Content Advisor** (professor): the scored concepts become suggestions per concept.
+- **Content Advisor -> Quiz Generator** (professor): a remedial quiz on the class's shared mistake, saved as a hidden
+  draft until the professor publishes it.
 - **Professor answer -> index**: a professor's answer to a gap is added to the
   index, so every future student gets it, cited as a "Faculty answer".
   Rebuilding the index re-adds these answers automatically.

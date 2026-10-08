@@ -35,6 +35,18 @@ import streamlit as st
 from agents import AgentContext, Orchestrator
 from agents.routing import ROUTE_LABELS
 from rag_core.config import DATA_DIR, DB_DIR, FACULTY_SOURCE_NAME, MIN_COHORT, TOP_K
+from rag_core.advice_log import (
+    KIND_CLARIFICATION,
+    KIND_REMEDIAL_QUIZ,
+    STATUS_APPROVED,
+    STATUS_DISMISSED,
+    STATUS_DRAFT,
+    add_advice,
+    approved_clarifications,
+    list_advice,
+    set_status as set_advice_status,
+    update_body as update_advice_body,
+)
 from rag_core.confusion import DEFAULT_WEIGHTS, SIGNALS, concept_key, load_and_compute, rank_stability
 from rag_core.embeddings import get_embeddings
 from rag_core.insights import cluster_questions, slide_label, summarize_clusters
@@ -49,10 +61,12 @@ from rag_core.item_analysis import (
 from rag_core.learning_log import (
     SCOPE_CLASS,
     SCOPE_PERSONAL,
+    delete_draft_quiz,
     get_quiz,
     list_attempts,
     list_quizzes,
     record_route_feedback,
+    set_quiz_scope,
 )
 from rag_core.library import delete_material
 from rag_core.loader import load_all_pdfs
@@ -70,13 +84,16 @@ from rag_core.query_log import (
 from rag_core.speech import course_vocabulary_hint, get_recognizer
 from rag_core.splitter import split_documents
 from rag_core.vectorstore import (
+    add_clarification,
     add_faculty_answer,
     build_vectorstore,
+    clarification_documents,
     faculty_documents,
     index_version,
     list_indexed_sources,
     list_indexed_topics,
     load_vectorstore,
+    remove_clarification,
     save_vectorstore,
     vectorstore_exists,
 )
@@ -204,7 +221,10 @@ def _run_ingestion() -> None:
 
     # Professor answers live in the question log, not in the PDFs, so a rebuild
     # must re-add them or they would silently disappear from the index.
-    faculty_docs = faculty_documents(resolved_answers(DB_DIR))
+    # Approved clarifications from the Content Advisor are kept in the advice log and re-added the same way.
+    faculty_docs = faculty_documents(resolved_answers(DB_DIR)) + clarification_documents(
+        approved_clarifications(DB_DIR)
+    )
     chunks = chunks + faculty_docs
 
     with st.spinner(f"Embedding {len(chunks)} chunk(s) and building the FAISS index ..."):
@@ -1048,6 +1068,122 @@ def _render_class_insight() -> None:
         st.bar_chart(dict(slide_counts.most_common(8)))
 
 
+def _render_advice(weights) -> None:
+    """Content Advisor: what the professor could do about the hardest concepts. Nothing here reaches students unapproved."""
+    vectorstore = _get_vectorstore()
+    result = _orchestrator().advise_class(_context(vectorstore), top_n=3, weights=weights)
+    advice = result.primary.data["advice"]
+    st.subheader("What you could do about it")
+    st.caption(
+        "The suggestions come from fixed rules applied to the evidence above; no AI model is involved in them. "
+        "Anything the local model drafts (a clarification, a quiz) stays hidden from students until you approve it."
+    )
+    render_trace(result.trace)
+    for a in advice:
+        with st.expander(f"{a.concept} (score {round(a.score)}, {a.confidence.lower()} confidence)"):
+            for finding in a.findings:
+                with st.container(border=True):
+                    st.markdown(f"**{finding.title}**")
+                    st.write(finding.detail)
+                    st.caption(f"Suggestion: {finding.action}")
+            if a.sub_questions:
+                st.markdown("**What students ask**")
+                for question, size in a.sub_questions:
+                    st.text(f"- {question}  ({size})")
+            if a.landing:
+                st.markdown("**Where they land**")
+                for label, count in a.landing:
+                    st.text(f"- {label}  ({count})")
+            _render_advice_actions(a, vectorstore)
+
+
+def _render_advice_actions(a, vectorstore) -> None:
+    if vectorstore is None:
+        st.info("Build the index first (Course Material tab) to draft material.")
+        return
+    ctx = _context(vectorstore)
+    saved = list_advice(concept_key=a.key, db_dir=DB_DIR)
+    st.markdown("**Draft something for students**")
+
+    # --- clarification note ------------------------------------------------------------------
+    approved = [x for x in saved if x["kind"] == KIND_CLARIFICATION and x["status"] == STATUS_APPROVED]
+    for item in approved:
+        with st.container(border=True):
+            st.caption("In the course material (students see it as a Faculty answer):")
+            st.write(item["body"])
+            if st.button("Remove from course material", key=f"unclar_{item['id']}"):
+                remove_clarification(load_vectorstore(DB_DIR, _load_embeddings()), item["concept"], item["body"], DB_DIR)
+                set_advice_status(item["id"], STATUS_DISMISSED, DB_DIR)
+                st.rerun()
+    if st.button("Draft a clarification note (about a minute)", key=f"draft_{a.key}"):
+        with st.spinner("Content Advisor is writing a draft from the course material ..."):
+            draft = _orchestrator().content_advisor.draft_clarification(a, ctx)
+        if draft.data.get("error"):
+            st.error(draft.text)
+        else:
+            add_advice(a.key, a.concept, KIND_CLARIFICATION, f"Clarification: {a.concept}", draft.text, db_dir=DB_DIR)
+            st.rerun()
+    for item in (x for x in saved if x["kind"] == KIND_CLARIFICATION and x["status"] == STATUS_DRAFT):
+        with st.container(border=True):
+            st.caption("Draft clarification. Read it, correct it, then approve. Students cannot see it yet.")
+            text = st.text_area("Draft", item["body"], key=f"clar_{item['id']}", height=170, label_visibility="collapsed")
+            doubtful = _orchestrator().content_advisor.review_text(text, a, ctx)
+            if doubtful:
+                st.warning(
+                    "The course material does not clearly support these sentences. Check them before approving:\n\n"
+                    + "\n".join(f"- {s}" for s in doubtful)
+                )
+            left, right = st.columns(2)
+            if left.button("Approve and add to course material", key=f"ok_{item['id']}", type="primary"):
+                if not text.strip():
+                    st.warning("Write something first.")
+                else:
+                    update_advice_body(item["id"], text.strip(), DB_DIR)
+                    add_clarification(load_vectorstore(DB_DIR, _load_embeddings()), a.concept, text.strip(), DB_DIR)
+                    set_advice_status(item["id"], STATUS_APPROVED, DB_DIR)
+                    st.toast("Added to the course material.")
+                    st.rerun()
+            if right.button("Discard", key=f"no_{item['id']}"):
+                set_advice_status(item["id"], STATUS_DISMISSED, DB_DIR)
+                st.rerun()
+
+    # --- remedial quiz -----------------------------------------------------------------------
+    for item in (x for x in saved if x["kind"] == KIND_REMEDIAL_QUIZ and x["status"] == STATUS_APPROVED):
+        st.caption(f"Remedial quiz published to the class on {item['decided_at'][:10]}.")
+    if st.button("Write a remedial quiz (2 to 3 minutes)", key=f"quiz_{a.key}"):
+        with st.spinner("Content Advisor -> Quiz Generator ..."):
+            made = _orchestrator().remedial_quiz(a, ctx)
+        quiz_id = made.primary.data.get("quiz_id")
+        if quiz_id is None:
+            st.error(made.primary.text)
+        else:
+            add_advice(a.key, a.concept, KIND_REMEDIAL_QUIZ, f"Remedial quiz: {a.concept}", ref=quiz_id, db_dir=DB_DIR)
+            st.rerun()
+    for item in (x for x in saved if x["kind"] == KIND_REMEDIAL_QUIZ and x["status"] == STATUS_DRAFT):
+        quiz = get_quiz(item["ref"], DB_DIR)
+        if quiz is None:
+            set_advice_status(item["id"], STATUS_DISMISSED, DB_DIR)
+            continue
+        with st.container(border=True):
+            st.caption("Draft remedial quiz. Check every question before publishing. Students cannot see it yet.")
+            for i, q in enumerate(quiz["questions"], start=1):
+                st.markdown(f"**{i}. {q['question']}**")
+                for j, option in enumerate(q["options"]):
+                    st.text(f"  {'[correct] ' if j == q['answer_index'] else '          '}{option}")
+                src = q.get("source", {})
+                st.caption(f"Source: {src.get('file', '')}, page {src.get('page', '?')} ({src.get('slide', '')})")
+            left, right = st.columns(2)
+            if left.button("Publish to students", key=f"pub_{item['id']}", type="primary"):
+                set_quiz_scope(item["ref"], SCOPE_CLASS, DB_DIR)
+                set_advice_status(item["id"], STATUS_APPROVED, DB_DIR)
+                st.toast("Published as a class quiz.")
+                st.rerun()
+            if right.button("Discard", key=f"nq_{item['id']}"):
+                delete_draft_quiz(item["ref"], DB_DIR)
+                set_advice_status(item["id"], STATUS_DISMISSED, DB_DIR)
+                st.rerun()
+
+
 def _signal_detail(signal, class_means) -> str:
     if signal.value is not None:
         return signal.evidence
@@ -1122,6 +1258,8 @@ def _render_concept_confusion() -> None:
                         f"Quiz finding: {wrong.share:.0%} of the class chose \"{wrong.text}\" instead of "
                         f"\"{q.correct_option.text}\" on \"{q.question}\"."
                     )
+    if report.concepts:
+        _render_advice({name: v / 100 for name, v in weights.items()})
     if report.unscored:
         st.caption(
             "Asked about but too little evidence to score: "

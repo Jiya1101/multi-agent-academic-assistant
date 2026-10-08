@@ -34,13 +34,15 @@ class Builder:
     def __init__(self):
         self.rows, self.quizzes, self.attempts, self.oral = [], [], [], []
 
-    def ask(self, student, concept, day=1, agent="Doubt Resolver", follow_up=False, session=True):
+    def ask(self, student, concept, day=1, agent="Doubt Resolver", follow_up=False, session=True,
+            page=1, top_score=0.5, question=None):
         row_id = len(self.rows) + 1
         self.rows.append({
             "id": row_id, "student_id": student, "session_id": f"sess-{student}-{day}" if session else None,
             "asked_at": f"2026-10-{day:02d}T10:00:00+00:00", "agent": agent,
             "follow_up_of": 1000 + row_id if follow_up else None,   # only "is it set" matters to the engine
-            "retrieved": [{"source": "notes.pdf", "page": 1, "section": concept}], "grounded": True,
+            "question": question or f"question {row_id} about {concept}", "top_score": top_score,
+            "retrieved": [{"source": "notes.pdf", "page": page, "section": concept}], "grounded": True,
         })
 
     def gap(self, student):

@@ -18,6 +18,7 @@ from rag_core.config import DB_DIR, QUERY_LOG_FILENAME
 
 SCOPE_CLASS = "class"
 SCOPE_PERSONAL = "personal"
+SCOPE_DRAFT = "draft"   # written for a professor to review; not visible to students until published as SCOPE_CLASS
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS quizzes (
@@ -81,6 +82,19 @@ def create_quiz(
             (_now(), topic, prompt, scope, owner, json.dumps(questions)),
         )
         return int(cursor.lastrowid)
+
+
+def set_quiz_scope(quiz_id: int, scope: str, db_dir: str | Path = DB_DIR) -> None:
+    """Move a quiz between scopes, e.g. publish a draft to the class."""
+    with closing(_connect(db_dir)) as conn, conn:
+        conn.execute("UPDATE quizzes SET scope = ? WHERE id = ?", (scope, quiz_id))
+
+
+def delete_draft_quiz(quiz_id: int, db_dir: str | Path = DB_DIR) -> bool:
+    """Delete a quiz that has not been published. A published or personal quiz is never deleted here."""
+    with closing(_connect(db_dir)) as conn, conn:
+        cursor = conn.execute("DELETE FROM quizzes WHERE id = ? AND scope = ?", (quiz_id, SCOPE_DRAFT))
+        return cursor.rowcount > 0
 
 
 def get_quiz(quiz_id: int, db_dir: str | Path = DB_DIR) -> Optional[Dict[str, Any]]:

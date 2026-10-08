@@ -25,7 +25,10 @@ Built as a B.Tech project: *Multi-Agent AI Framework for Personalized Academic A
 - **Concepts to Revisit**: which slide topics the class seems to struggle with, ranked by a **confusion score** that
   combines several kinds of evidence (who asked, who came back or asked for an explanation, class quiz results, oral
   checks, whether it kept coming up across days) and shows that evidence, how confident the score is, and how much the
-  ranking changes if the weights change. Many questions alone do not rank a topic high.
+  ranking changes if the weights change. Many questions alone do not rank a topic high. Under the ranking, the
+  **Content Advisor** suggests what to do about the top topics (rule-based, citing its evidence) and can draft a
+  clarification note or a remedial quiz with the local model. Drafts stay hidden from students until the professor
+  reads, edits and approves them.
 - **Class Insight**: student questions grouped by meaning, with the slides students keep landing on.
 - **Pending Gaps**: questions the notes could not answer. One answer is added to the course material for everyone.
 - **Class Quizzes**: quizzes on the topics the class keeps asking about, with aggregated (anonymous) results,
@@ -35,7 +38,7 @@ Built as a B.Tech project: *Multi-Agent AI Framework for Personalized Academic A
 
 ## The agents
 
-Eight agents with different jobs, coordinated by an orchestrator that routes each message and hands work
+Nine agents with different jobs, coordinated by an orchestrator that routes each message and hands work
 between them. The app shows which agents ran in an "Agents involved" panel.
 
 | Agent | Job |
@@ -47,6 +50,7 @@ between them. The app shows which agents ran in an "Agents involved" panel.
 | Oral Assessor | Ask a spoken question on a heading, score the answer's content and fluency, and list the points missed |
 | Progress Tracker | Per-student strong and weak topics from questions and quiz scores |
 | Faculty Insight | Cluster the class's questions; find topics the class keeps asking about |
+| Content Advisor | Suggest what to change for the topics the class finds hardest; draft a clarification note (professor approves) |
 | Gap Handler | Queue a question the notes cannot answer for the professor |
 
 Routing uses a small trained classifier (with hand-written rules as a fallback) that learns from corrections

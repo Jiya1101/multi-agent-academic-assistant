@@ -94,6 +94,43 @@ def faculty_documents(qa_pairs: Iterable[Tuple[str, str]]) -> List[Document]:
     ]
 
 
+def clarification_documents(items: Iterable[Tuple[str, str]]) -> List[Document]:
+    """
+    Turn approved (concept, text) clarifications into indexable Documents.
+
+    The section is the concept's own title, NOT a new heading. Students' later questions will often land on
+    this document; keeping the concept's title means those questions are still counted under the concept they
+    are about, so the confusion score does not change just because the clarification now answers them.
+    """
+    return [
+        Document(
+            page_content=f"Q: What should I know about {concept}?\nA: {text}",
+            metadata={"source": FACULTY_SOURCE_NAME, "page": 0, "section": concept, "kind": "clarification"},
+        )
+        for concept, text in items
+    ]
+
+
+def add_clarification(vectorstore: FAISS, concept: str, text: str, db_dir: str | Path = DB_DIR) -> None:
+    """Add one approved clarification to the live index and persist it."""
+    vectorstore.add_documents(clarification_documents([(concept, text)]))
+    save_vectorstore(vectorstore, db_dir)
+
+
+def remove_clarification(vectorstore: FAISS, concept: str, text: str, db_dir: str | Path = DB_DIR) -> int:
+    """Remove a previously added clarification from the index. Returns how many documents were removed."""
+    wanted = clarification_documents([(concept, text)])[0].page_content
+    ids = [
+        doc_id for doc_id in vectorstore.index_to_docstore_id.values()
+        if vectorstore.docstore._dict[doc_id].metadata.get("kind") == "clarification"
+        and vectorstore.docstore._dict[doc_id].page_content == wanted
+    ]
+    if ids:
+        vectorstore.delete(ids)
+        save_vectorstore(vectorstore, db_dir)
+    return len(ids)
+
+
 def add_faculty_answer(
     vectorstore: FAISS,
     question: str,
