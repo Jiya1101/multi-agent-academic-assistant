@@ -34,7 +34,7 @@ import streamlit as st
 
 from agents import AgentContext, Orchestrator, remember, turn_from
 from agents.routing import ROUTE_LABELS
-from rag_core.config import DATA_DIR, DB_DIR, FACULTY_SOURCE_NAME, MIN_COHORT, TOP_K
+from rag_core.config import DATA_DIR, DB_DIR, FACULTY_SOURCE_NAME, TOP_K
 from rag_core.advice_log import (
     KIND_CLARIFICATION,
     KIND_REMEDIAL_QUIZ,
@@ -57,7 +57,6 @@ from rag_core.item_analysis import (
     SIGNIFICANT_P,
     analyze_quizzes,
     likely_misconceptions,
-    questions_to_review,
 )
 from rag_core.learning_log import (
     SCOPE_CLASS,
@@ -388,7 +387,7 @@ def render_quiz(quiz: dict, student_id, key: str, vectorstore) -> None:
     st.subheader(f"Quiz: {human_title(quiz['topic'])}")
     level = next((q.get("level") for q in quiz["questions"] if q.get("level")), None)
     if level:
-        st.caption(f"Difficulty: {level.capitalize()}. That is what the questions were written to be; it is not measured.")
+        st.caption(f"Difficulty: {level.capitalize()}")
     with st.form(f"quizform_{quiz_key}"):
         picks = []
         for i, q in enumerate(quiz["questions"]):
@@ -1006,7 +1005,7 @@ _SECTION_STATE = {
     "Oral check": ["oral_question_result", "oral_assessment_result", "oral_transcript", "oral_notice", "oral_audio_digest"],
     "Study notes": [],
     "Quiz": ["student_material_quiz", "quiz_focus"],
-    "Class": ["class_quiz_pick", "class_part"],
+    "Class": ["class_subject", "class_topic", "class_started", "class_part", "added_subject", "added_item"],
     "My progress": [],
 }
 _SECTION_PREFIXES = {"Study notes": ("notes_",), "Quiz": ("quizresult_", "recap_")}
@@ -1080,17 +1079,32 @@ def render_ask(vectorstore, student_id) -> None:
             render_student_response(entry["resp"], show_question=False)
 
 
+def _quiz_subject(quiz: dict) -> str:
+    """The course document most of a quiz's questions were written from."""
+    files = Counter(q.get("source", {}).get("file") for q in quiz["questions"] if q.get("source", {}).get("file"))
+    return human_title(Path(files.most_common(1)[0][0]).stem) if files else "Other"
+
+
 def _render_practice_quizzes(vectorstore, student_id) -> None:
-    """Quizzes on topics the class found tricky. Taking one also tells the teacher where the class is stuck."""
+    """Pick a subject, then a topic, then start. Taking a class quiz also tells the teacher where the class is stuck."""
     quizzes = list_quizzes(SCOPE_CLASS, DB_DIR)
     if not quizzes:
         st.info("No practice quizzes yet.")
         return
-    st.write("Practice on topics the class has found tricky.")
-    by_id = {q["id"]: q for q in quizzes}
+    by_subject: dict = {}
+    for quiz in sorted(quizzes, key=lambda q: human_title(q["topic"]).lower()):
+        by_subject.setdefault(_quiz_subject(quiz), []).append(quiz)
     first_try = {}
     for attempt in list_attempts(student_id, DB_DIR):
         first_try.setdefault(attempt["quiz_id"], attempt)
+
+    subject = st.selectbox(
+        "Subject", sorted(by_subject), index=None, placeholder="Choose a subject", key="class_subject",
+        on_change=lambda: st.session_state.pop("class_topic", None),
+    )
+    if subject is None:
+        return
+    by_id = {q["id"]: q for q in by_subject[subject]}
 
     def label(quiz_id: int) -> str:
         quiz = by_id[quiz_id]
@@ -1098,27 +1112,81 @@ def _render_practice_quizzes(vectorstore, student_id) -> None:
         status = f"done, {tried['correct']}/{tried['total']}" if tried else "not taken"
         return f"{human_title(quiz['topic'])} - {len(quiz['questions'])} questions - {status}"
 
-    picked = st.selectbox("Practice quiz", list(by_id), format_func=label, key="class_quiz_pick", label_visibility="collapsed")
-    render_quiz(by_id[picked], student_id, "class", vectorstore)
+    picked = st.selectbox("Topic", list(by_id), index=None, placeholder="Choose a topic", format_func=label, key="class_topic")
+    if picked is None:
+        return
+    if st.button("Start quiz", type="primary", key="class_start"):
+        st.session_state["class_started"] = picked
+    if st.session_state.get("class_started") == picked:
+        render_quiz(by_id[picked], student_id, "class", vectorstore)
 
 
-def _render_added_material() -> None:
-    """What the teacher has added to the course material: answers to class questions and extra notes, newest first."""
+def _nearest_source(text: str, vectorstore):
+    """The course file whose content is closest to `text`; None when there is no index."""
+    if vectorstore is None or not text:
+        return None
+    try:
+        docs = vectorstore.similarity_search(text, k=8)
+    except Exception:
+        return None
+    for doc in docs:
+        name = Path(doc.metadata.get("source", "")).name
+        if name and name != FACULTY_SOURCE_NAME:
+            return name
+    return None
+
+
+def _added_subject(item: dict, vectorstore) -> str:
+    """
+    The subject an added item belongs to. An answer to a question the notes did not cover has no matching slide, so it
+    takes the one file the student was studying when they asked (else General); a note about a topic from the notes
+    takes the file closest to that topic.
+    """
+    if item.get("subject"):                      # the professor filed it
+        return "General" if item["subject"] == "General" else human_title(Path(item["subject"]).stem)
+    files = [f for f in item.get("scope", []) if not f.startswith("__")]
+    if len(files) == 1:
+        name = files[0]
+    else:
+        name = _nearest_source(item["title"], vectorstore) if item.get("from_notes") else None
+    return human_title(Path(name).stem) if name else "General"
+
+
+def _render_added_material(vectorstore=None) -> None:
+    """What the teacher has added to the course material: pick a subject, then an item."""
     items = [
-        {"title": a["question"], "body": a["answer"], "at": a["at"] or ""} for a in resolved_answers_dated(DB_DIR)
+        {"title": a["question"], "body": a["answer"], "at": a["at"] or "", "scope": a["scope"], "subject": a["subject"]}
+        for a in resolved_answers_dated(DB_DIR)
     ] + [
-        {"title": f"Note: {human_title(n['concept'])}", "body": n["body"], "at": n["decided_at"] or ""}
+        {"title": f"Note: {human_title(n['concept'])}", "body": n["body"], "at": n["decided_at"] or "", "scope": [], "from_notes": True}
         for n in list_advice(kind=KIND_CLARIFICATION, status=STATUS_APPROVED, db_dir=DB_DIR)
     ]
     if not items:
         st.info("Nothing has been added yet.")
         return
+    by_subject: dict = {}
     for item in sorted(items, key=lambda i: i["at"], reverse=True):
-        with st.container(border=True):
-            st.markdown(f"**{item['title']}**")
-            st.write(item["body"])
-            if item["at"]:
-                st.caption(f"Added {item['at'][:10]}")
+        item["key"] = f"{item['at']}|{item['title']}"
+        by_subject.setdefault(_added_subject(item, vectorstore), []).append(item)
+
+    subject = st.selectbox(
+        "Subject", sorted(by_subject), index=None, placeholder="Choose a subject", key="added_subject",
+        on_change=lambda: st.session_state.pop("added_item", None),
+    )
+    if subject is None:
+        return
+    by_key = {i["key"]: i for i in by_subject[subject]}
+    picked = st.selectbox(
+        "Material", list(by_key), index=None, placeholder="Choose material", key="added_item",
+        format_func=lambda k: by_key[k]["title"],
+    )
+    if picked is None:
+        return
+    item = by_key[picked]
+    with st.container(border=True):
+        st.write(item["body"])
+        if item["at"]:
+            st.caption(f"Added {item['at'][:10]}")
 
 
 def render_class_section(vectorstore, student_id) -> None:
@@ -1128,7 +1196,7 @@ def render_class_section(vectorstore, student_id) -> None:
         label_visibility="collapsed",
     )
     if part == "Added to the material":
-        _render_added_material()
+        _render_added_material(vectorstore)
     else:
         _render_practice_quizzes(vectorstore, student_id)
 
@@ -1410,6 +1478,7 @@ def _render_pending_gaps() -> None:
         "it is added to the course material and used for all future questions."
     )
     groups = cluster_questions([g["question"] for g in gaps], _load_embeddings())
+    library = _library(_get_vectorstore())
 
     for group in groups:
         members = [gaps[i] for i in group]
@@ -1422,6 +1491,12 @@ def _render_pending_gaps() -> None:
                 st.text(f"- {member['question']}")
 
             answer = st.text_area("Your answer", key=f"answer_{key}")
+            chosen = Counter(f for m in members for f in m["scope"] if not f.startswith("__"))
+            default = next(iter(chosen)) if len(chosen) == 1 and chosen.most_common(1)[0][0] in library else "General"
+            subject = st.selectbox(
+                "Subject", [*library, "General"], index=([*library, "General"]).index(default), key=f"subject_{key}",
+                format_func=lambda f: f if f == "General" else human_title(Path(f).stem),
+            )
             if st.button("Add to knowledge base", key=f"resolve_{key}"):
                 if not answer.strip():
                     st.warning("Write an answer first.")
@@ -1431,7 +1506,7 @@ def _render_pending_gaps() -> None:
                     # Fresh copy from disk so the shared cached index is never mutated.
                     fresh_index = load_vectorstore(DB_DIR, _load_embeddings())
                     add_faculty_answer(fresh_index, representative, answer.strip(), DB_DIR)
-                    resolve_gaps([m["id"] for m in members], representative, answer.strip(), DB_DIR)
+                    resolve_gaps([m["id"] for m in members], representative, answer.strip(), DB_DIR, subject=subject)
                     st.toast(f"Added to the knowledge base ({len(members)} question(s) resolved).")
                     st.rerun()
 
@@ -1454,18 +1529,33 @@ def _render_class_quizzes() -> None:
         render_trace(st.session_state["pipeline"].trace)
 
     quizzes = list_quizzes(SCOPE_CLASS, DB_DIR)
+    attempts = list_attempts(db_dir=DB_DIR)
+    analysis_by_quiz = {a.quiz_id: a for a in analyze_quizzes(quizzes, attempts)}
     st.subheader(f"Published quizzes ({len(quizzes)})")
     st.caption("Each question names the slide it was written from, so you can check it before students rely on it.")
     for quiz in quizzes:
         with st.expander(f"{quiz['topic']} — {len(quiz['questions'])} question(s)"):
+            show = st.toggle("Show how the class answered", key=f"breakdown_{quiz['id']}")
+            analysis = analysis_by_quiz.get(quiz["id"])
+            if show and analysis is None:
+                st.caption("No student has taken this quiz yet.")
+            elif show and not analysis.reportable:
+                st.caption(
+                    f"{analysis.students} of the {analysis.needed} students needed so far. "
+                    "Numbers appear once enough different students have taken the quiz."
+                )
+            stats = {q.number: q for q in analysis.questions} if show and analysis and analysis.reportable else {}
             for i, q in enumerate(quiz["questions"], start=1):
                 st.markdown(f"**{i}. {q['question']}**")
+                stat = stats.get(i)
                 for j, option in enumerate(q["options"]):
-                    st.text(f"  {'[correct] ' if j == q['answer_index'] else '          '}{option}")
+                    share = f"   ({stat.options[j].share:.0%} chose this)" if stat else ""
+                    st.text(f"  {'[correct] ' if j == q['answer_index'] else '          '}{option}{share}")
                 src = q.get("source", {})
                 st.caption(f"Source: {src.get('file', '')}, page {src.get('page', '?')} ({src.get('slide', '')})")
+                if stat:
+                    _render_question_stat(stat)
 
-    attempts = list_attempts(db_dir=DB_DIR)
     st.subheader("Class results by topic")
     if not attempts:
         st.info("No quiz attempts yet.")
@@ -1489,7 +1579,6 @@ def _render_class_quizzes() -> None:
         width="stretch",
     )
     st.caption("Results are aggregated; individual students are not shown.")
-    _render_item_analysis(quizzes, attempts)
 
 
 def _discrimination_text(q) -> str:
@@ -1505,89 +1594,22 @@ def _discrimination_text(q) -> str:
     return f"Reversed ({value:+.2f})"
 
 
-def _render_item_analysis(quizzes, attempts) -> None:
-    """What the class's answers say about each quiz question: likely misconceptions and weak questions."""
-    st.subheader("Question analysis")
-    st.caption(
-        f"Looks at every question and every answer option. Numbers appear only once at least {MIN_COHORT} different "
-        "students have taken a quiz, and only each student's first attempt counts."
-    )
-    analyses = analyze_quizzes(quizzes, attempts)
-    waiting = [a for a in analyses if not a.reportable]
-    ready = [a for a in analyses if a.reportable]
-    for a in waiting:
-        st.caption(f"{human_title(a.topic)}: {a.students} of the {a.needed} students needed so far.")
-    if not ready:
-        st.info("No quiz has enough students yet for a question-level view.")
-        return
-
-    st.markdown("**Likely misconceptions**")
-    misconceptions = likely_misconceptions(ready)
-    if not misconceptions:
-        st.info(
-            "No wrong answer clearly stood out. That does not rule one out: with a small class a real shared "
-            "mistake can be missed."
-        )
-    for q in misconceptions:
+def _render_question_stat(q) -> None:
+    """The class's answers to one quiz question, shown under the question when the professor asks for it."""
+    line = f"{q.correct_rate:.0%} of {q.students} students got this right"
+    if q.skipped:
+        line += f", {q.skipped} skipped"
+    if q.discrimination is not None:
+        line += f". Strong students did better? {_discrimination_text(q)}"
+    st.caption(line)
+    if q.misconception:
         wrong = q.misconception
-        with st.container(border=True):
-            st.markdown(
-                f"**{human_title(q.topic)}, question {q.number}.** {wrong.share:.0%} of the class "
-                f"({wrong.count} of {q.students}) chose \"{wrong.text}\" instead of \"{q.correct_option.text}\"."
-            )
-            st.write(q.question)
-            src = q.source
-            st.caption(
-                f"This is a pattern worth a look, not proof of a misconception. Source: {src.get('file', '')}, "
-                f"page {src.get('page', '?')} ({src.get('slide', '')})"
-            )
-
-    st.markdown("**Questions to check**")
-    flagged = questions_to_review(ready)
-    if not flagged:
-        st.info("No question was flagged. The checks are cautious, so this is not a guarantee that every question is sound.")
-    for q in flagged:
-        with st.container(border=True):
-            st.markdown(f"**{human_title(q.topic)}, question {q.number}** ({q.correct_rate:.0%} correct)")
-            st.write(q.question)
-            for flag in q.flags:
-                st.caption(f"{flag}: {FLAG_HELP[flag]}")
-
-    st.markdown("**All questions**")
-    for a in ready:
-        with st.expander(f"{human_title(a.topic)} ({a.students} students, average {a.average:.0%})"):
-            st.dataframe(
-                [
-                    {
-                        "Question": f"{q.number}. {q.question}",
-                        "Correct": f"{q.correct_rate:.0%}",
-                        "Skipped": q.skipped,
-                        "Strong students did better?": _discrimination_text(q),
-                        "Flags": ", ".join(q.flags),
-                    }
-                    for q in a.questions
-                ],
-                hide_index=True,
-                width="stretch",
-            )
-            for q in a.questions:
-                st.markdown(f"**{q.number}. {q.question}**")
-                st.dataframe(
-                    [
-                        {
-                            "Answer option": o.text + ("  (correct)" if o.is_correct else ""),
-                            "Chosen by": o.count,
-                            "Share of class": f"{o.share:.0%}",
-                        }
-                        for o in q.options
-                    ],
-                    hide_index=True,
-                    width="stretch",
-                )
-    st.caption(
-        '"Strong students did better?" compares each question with the results of the same students on the other '
-        "questions. It is a hint from a small class, not a measurement."
-    )
+        st.caption(
+            f"{wrong.share:.0%} of the class ({wrong.count} of {q.students}) chose \"{wrong.text}\" instead of "
+            "the correct answer. A pattern worth a look, not proof of a misconception."
+        )
+    for flag in q.flags:
+        st.caption(f"{flag}: {FLAG_HELP[flag]}")
 
 
 def _render_course_material() -> None:

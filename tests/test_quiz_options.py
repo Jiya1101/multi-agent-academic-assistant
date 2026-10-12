@@ -526,7 +526,7 @@ render_quiz_builder(build_vectorstore(docs(), _load_embeddings()), "student1")
             finally:
                 page.unlink(missing_ok=True)
         self.assertEqual(len(picks), 5)                                            # five questions on screen
-        self.assertTrue(any(c.startswith("Difficulty: Hard.") and "not measured" in c for c in captions), captions)
+        self.assertTrue(any(c == "Difficulty: Hard" for c in captions), captions)
         self.assertTrue(any("HARD question" in m for m in markdown))               # the model was told it was a Hard quiz
 
 

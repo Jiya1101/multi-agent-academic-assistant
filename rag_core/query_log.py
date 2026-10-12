@@ -55,6 +55,7 @@ _ADDED_COLUMNS = {
     "session_id": "TEXT",      # random per-browser-session token, not tied to a person
     "follow_up_of": "INTEGER", # id of the earlier question this one came back to
     "original_question": "TEXT",  # what the student typed, when it was rewritten into a standalone question
+    "resolved_subject": "TEXT",   # the course file the professor filed a resolved answer under, or "General"
 }
 
 
@@ -242,8 +243,9 @@ def resolve_gaps(
     representative_question: str,
     answer: str,
     db_dir: str | Path = DB_DIR,
+    subject: Optional[str] = None,
 ) -> None:
-    """Mark gap rows as resolved and store the professor's answer on them."""
+    """Mark gap rows as resolved and store the professor's answer on them, filed under `subject` (a course file or "General")."""
     ids = list(ids)
     if not ids:
         return
@@ -251,24 +253,25 @@ def resolve_gaps(
     with closing(_connect(db_dir)) as conn, conn:
         conn.execute(
             f"UPDATE queries SET status = ?, faculty_answer = ?, "
-            f"resolved_question = ?, resolved_at = ? "
+            f"resolved_question = ?, resolved_at = ?, resolved_subject = ? "
             f"WHERE status = ? AND id IN ({placeholders})",
-            (STATUS_RESOLVED, answer, representative_question, _now(), STATUS_GAP, *ids),
+            (STATUS_RESOLVED, answer, representative_question, _now(), subject, STATUS_GAP, *ids),
         )
 
 
 def resolved_answers_dated(db_dir: str | Path = DB_DIR) -> List[Dict[str, Any]]:
     """
     The professor's answers to unanswered questions, newest first, one per (question, answer) however many students
-    asked it: [{"question", "answer", "at"}]. What students see under "Added to the material"; no student is named.
+    asked it: [{"question", "answer", "at", "scope", "subject"}]. What students see under "Added to the material"; no student is
+    named. `scope` is the files the student had chosen when asking (empty when they had chosen all).
     """
     with closing(_connect(db_dir)) as conn:
         rows = conn.execute(
-            "SELECT resolved_question AS question, faculty_answer AS answer, MAX(resolved_at) AS at FROM queries "
+            "SELECT resolved_question AS question, faculty_answer AS answer, MAX(resolved_at) AS at, scope, resolved_subject AS subject FROM queries "
             "WHERE status = ? GROUP BY resolved_question, faculty_answer ORDER BY at DESC",
             (STATUS_RESOLVED,),
         ).fetchall()
-    return [dict(r) for r in rows]
+    return [{**dict(r), "scope": json.loads(r["scope"] or "[]")} for r in rows]
 
 
 def resolved_answers(db_dir: str | Path = DB_DIR) -> List[Tuple[str, str]]:

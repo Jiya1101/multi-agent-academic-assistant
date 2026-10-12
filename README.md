@@ -19,7 +19,7 @@ Built as a B.Tech project: *Multi-Agent AI Framework for Personalized Academic A
 - **Oral check**: a spoken question on one of the material's main headings, a different one each time. You get a content score, the key points you missed, the full model answer and pause/fluency metrics.
 - **Study notes**: heading-wise notes (definition, key points, use case when the slides give one), as a **downloadable PDF**.
 - **Quiz**: a new set of multiple-choice questions every time (definitions, abbreviations, true statements, which topic). You choose **how many questions (1 to 15) and how hard (Easy, Medium, Hard, or "Adapt to me")**, which looks at your recent quiz scores. There is also a focused test on one topic, offered right after an answer in Ask.
-- **Class**: *Practice quizzes* on topics the class found tricky (the quizzes the professor publishes, not announced as such; taking one also shows the professor where the class is stuck), and *Added to the material*, the answers and notes the professor has added, newest first. No student is identified.
+- **Class**: *Practice quizzes* (the student chooses a subject, then a topic, then starts; these are the quizzes the professor publishes, not announced as such, and taking one also shows the professor where the class is stuck), and *Added to the material* (subject, then item), the answers and notes the professor has added. No student is identified.
 - **My progress**: one tab per material with quiz scores, topics, oral checks and a "focus next" suggestion.
 
 **For professors**
@@ -30,10 +30,11 @@ Built as a B.Tech project: *Multi-Agent AI Framework for Personalized Academic A
   evidence) and lets you draft a clarification note or a remedial quiz with the local model. Drafts stay hidden from
   students until you read, edit and approve them. The scoring weights can be changed under "Adjust scoring".
 - **Class Insight**: student questions grouped by meaning.
-- **Pending Gaps**: questions the notes could not answer. One answer is added to the course material for everyone, and students see it under Class, "Added to the material".
+- **Pending Gaps**: questions the notes could not answer. One answer, filed under a subject you choose, is added to the course material for everyone, and students see it under Class, "Added to the material".
 - **Class Quizzes**: quizzes on the topics the class keeps asking about, with aggregated (anonymous) results,
-  plus a **Question analysis** that shows the wrong answers many students chose (likely misconceptions) and
-  flags weak quiz questions. Numbers appear only once at least 5 students have taken a quiz.
+  plus an optional "Show how the class answered" switch inside each quiz. It puts the share of students who
+  chose each option next to the question, points out wrong answers many students chose (likely misconceptions)
+  and flags weak questions. Numbers appear only once at least 5 students have taken the quiz.
 - **Course Material** (upload PDFs, rebuild the index).
 
 ## The agents
@@ -107,7 +108,7 @@ A single laptop is not a class, so the professor dashboard starts empty. To simu
 ```bash
 python seed_demo.py              # adds a simulated class of students asking questions
 python publish_quizzes.py        # writes class quizzes on the topics they asked about (takes minutes)
-python seed_demo.py --quiz-attempts   # 24 simulated students take those quizzes (feeds Question analysis)
+python seed_demo.py --quiz-attempts   # 24 simulated students take those quizzes (feeds the class breakdown on each quiz)
 python seed_demo.py --class-activity  # the same students ask questions over several days (feeds Concepts to Revisit)
 python seed_demo.py --clear      # removes the simulated questions and quiz attempts again
 ```

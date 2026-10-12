@@ -108,7 +108,7 @@ DEMO_STUDENT_QUESTIONS = [
 
 
 # Simulated students who take the published class quizzes (--quiz-attempts). Their answers follow patterns
-# planted on purpose, by question position, so the Question analysis tab can be checked against the truth.
+# planted on purpose, by question position, so the per-quiz class breakdown can be checked against the truth.
 # The pattern repeats every 6 questions: most are ordinary (stronger students do better), plus one easy
 # question, one hard question with a popular wrong answer (a misconception) and one faulty answer key
 # (the keyed answer is chosen LESS often by stronger students). Faulty keys are kept rare on purpose:

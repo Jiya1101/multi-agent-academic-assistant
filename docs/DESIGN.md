@@ -474,7 +474,7 @@ data point: nothing was discarded, but only about 2 of the 5 questions were reas
 the transactions fails ...?"); the rest were plain recall ("What is the purpose of read replicas ...?"), and one had two
 defensible answers (the term "NoSQL" is attributed to both Carlo Strozzi and Eric Evans, and both were options). Two runs
 is a tiny sample, but it shows the Hard instruction is followed inconsistently and that the key check does not catch a
-question with two right answers; that is what the professor's Question analysis (misconceptions, "check the answer key")
+question with two right answers; that is what the professor's per-quiz class breakdown (misconceptions, "check the answer key")
 is for once students have taken the quiz. The Hard setting therefore remains a request, not a guarantee.
 
 ### How many passages are retrieved (K)
@@ -503,15 +503,22 @@ not an explanation, so the practical fix is a text version of those notes.
 The teacher's work reaches students in two places, under one **Class** section in the student navigation.
 
 - **Practice quizzes** lists the quizzes the professor has published to the class (scope `class`): never a draft (the
-  Content Advisor's remedial quizzes stay hidden until published) and never another student's personal quiz. It is worded
-  as practice on topics the class found tricky and does not announce who wrote it. A student picks one from a list that
-  shows its topic, number of questions and their own first score ("done, 3/5" or "not taken"), takes it, and sees the
+  Content Advisor's remedial quizzes stay hidden until published) and never another student's personal quiz. It does not
+  announce who wrote it and carries no explanatory text. A student chooses a subject (the course document most of the
+  quiz's questions came from), then a topic, then presses Start quiz; nothing opens before that. The topic list
+  shows its name, number of questions and their own first score ("done, 3/5" or "not taken"), takes it, and sees the
   usual per-question explanations and sources. The attempt is saved under the student, so these quizzes are also how the
-  professor's Question analysis and the confusion score's quiz signal get their data: before this section existed
+  professor's per-quiz class breakdown and the confusion score's quiz signal get their data: before this section existed
   students had no way to take a published class quiz, so those results could not appear.
 - **Added to the material** lists the professor's answers to questions the notes could not answer (one entry however
-  many students asked it) and approved clarification notes, newest first. They are also in the search index, so a student
-  asking the same thing gets them cited as a "Faculty answer".
+  many students asked it) and approved clarification notes. A student chooses a subject, then an item (newest first); nothing is shown before that. The
+  subject of an answer is chosen by the professor in Pending Gaps when resolving it (a list of the course files plus
+  "General"; it starts on the one file the asking students had selected, else "General"). It is not guessed, because a
+  question the notes did not cover has no matching slide to place it by: guessing the nearest file on the real index put
+  a deadline question under "Mutual Exclusion". Answers filed before this choice existed fall back to the file the
+  student had selected, else "General". A clarification note takes the file
+  closest to its topic. The entries are also in the search index, so a student asking the same thing gets them cited as a
+  "Faculty answer".
 
 Pending Gaps was tested end to end (queue, grouping, answer, resolution of every question in the group, the index, a
 student asking again, a rebuild, an empty answer, a missing index). On the real index a teacher's answer was found first

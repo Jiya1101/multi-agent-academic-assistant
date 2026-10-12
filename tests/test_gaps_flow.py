@@ -140,6 +140,51 @@ class AnsweringTests(GapsTestCase):
         self.assertTrue(all(r["faculty_answer"] == POD_ANSWER for r in resolved))
         self.assertEqual([r["question"] for r in rows if r["status"] == STATUS_GAP], [DEADLINE])
 
+    def course_files(self):
+        from rag_core.vectorstore import list_indexed_sources
+        return [f for f in list_indexed_sources(self.vectorstore) if f != FACULTY_SOURCE_NAME]
+
+    def pod_subject_box(self, at):
+        return at.selectbox(key=self.pod_box(at).key.replace("answer_", "subject_"))
+
+    def test_the_teacher_files_the_answer_under_a_subject(self):
+        self.queue_gaps()
+        at = self.open_page()
+        box = self.pod_subject_box(at)
+        files = self.course_files()
+        self.assertTrue(files)
+        self.assertEqual(len(box.options), len(files) + 1)
+        self.assertEqual(box.value, "General")                      # nothing says which subject it belongs to
+        self.assertEqual(box.options[-1], "General")
+
+    def test_the_chosen_subject_is_saved_and_students_find_the_answer_under_it(self):
+        self.queue_gaps()
+        at = self.open_page()
+        self.pod_box(at).set_value(POD_ANSWER)
+        self.pod_subject_box(at).set_value(self.course_files()[0])
+        at.run()
+        index = [b.key for b in at.text_area if b.key.startswith("answer_")].index(self.pod_box(at).key)
+        [b for b in at.button if b.label == "Add to knowledge base"][index].click().run()
+        saved = {r["resolved_subject"] for r in list_queries(db_dir=self.db) if r["status"] == STATUS_RESOLVED}
+        self.assertEqual(saved, {self.course_files()[0]})
+        from rag_core.query_log import resolved_answers_dated
+        self.assertEqual([a["subject"] for a in resolved_answers_dated(self.db)], [self.course_files()[0]])
+
+    def test_a_subject_left_as_general_is_saved_as_general(self):
+        self.answer_pods()
+        saved = {r["resolved_subject"] for r in list_queries(db_dir=self.db) if r["status"] == STATUS_RESOLVED}
+        self.assertEqual(saved, {"General"})
+
+    def test_the_subject_defaults_to_the_one_file_the_students_were_studying(self):
+        first = self.course_files()[0]
+        for i, q in enumerate(POD_QUESTIONS):
+            ctx = AgentContext(vectorstore=self.vectorstore, db_dir=self.db, student_id=f"s{i}", llm=fake("unused"),
+                               source_filenames=[first])
+            ctx.session_id = f"sess-{i}"
+            self.orch.handle(q, ctx)
+        at = self.open_page()
+        self.assertEqual(self.pod_subject_box(at).value, first)
+
     def test_the_queue_shrinks_and_the_page_shows_what_is_left(self):
         at = self.answer_pods()
         self.assertEqual(at.exception, [])
