@@ -143,8 +143,8 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     # Professor pipeline                                                 #
     # ------------------------------------------------------------------ #
-    def advise_class(self, ctx: AgentContext, top_n: int = 3, weights=None) -> OrchestratorResult:
-        """Faculty Insight scores the concepts; the Content Advisor suggests what to change for the top ones."""
+    def advise_class(self, ctx: AgentContext, top_n: int = 3, weights=None, only=None) -> OrchestratorResult:
+        """Faculty Insight scores the concepts; the Content Advisor suggests what to change for the top ones (or one, `only`)."""
         trace = ["Professor action: get suggestions for the concepts the class finds hardest"]
         report = self.faculty_insight.concept_report(ctx, weights)
         trace.append(f"Faculty Insight: scored {len(report.concepts)} concept(s) from questions, quizzes and oral checks")
@@ -155,7 +155,7 @@ class Orchestrator:
                              text="Not enough evidence yet to suggest anything.", data={"advice": [], "report": report})],
                 trace,
             )
-        advised = self.content_advisor.run("", ctx, top_n=top_n, report=report)
+        advised = self.content_advisor.run("", ctx, top_n=top_n, report=report, only=only)
         trace.append(f"Faculty Insight -> Content Advisor: suggestions for the top {len(advised.data['advice'])}")
         return OrchestratorResult(Route("advise_class", "professor pipeline"), [advised], trace)
 

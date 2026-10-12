@@ -257,6 +257,20 @@ def resolve_gaps(
         )
 
 
+def resolved_answers_dated(db_dir: str | Path = DB_DIR) -> List[Dict[str, Any]]:
+    """
+    The professor's answers to unanswered questions, newest first, one per (question, answer) however many students
+    asked it: [{"question", "answer", "at"}]. What students see under "Added to the material"; no student is named.
+    """
+    with closing(_connect(db_dir)) as conn:
+        rows = conn.execute(
+            "SELECT resolved_question AS question, faculty_answer AS answer, MAX(resolved_at) AS at FROM queries "
+            "WHERE status = ? GROUP BY resolved_question, faculty_answer ORDER BY at DESC",
+            (STATUS_RESOLVED,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def resolved_answers(db_dir: str | Path = DB_DIR) -> List[Tuple[str, str]]:
     """Distinct (question, answer) pairs a professor has written so far."""
     with closing(_connect(db_dir)) as conn:

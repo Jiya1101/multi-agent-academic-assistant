@@ -19,20 +19,18 @@ Built as a B.Tech project: *Multi-Agent AI Framework for Personalized Academic A
 - **Oral check**: a spoken question on one of the material's main headings, a different one each time. You get a content score, the key points you missed, the full model answer and pause/fluency metrics.
 - **Study notes**: heading-wise notes (definition, key points, use case when the slides give one), as a **downloadable PDF**.
 - **Quiz**: a new set of multiple-choice questions every time (definitions, abbreviations, true statements, which topic). You choose **how many questions (1 to 15) and how hard (Easy, Medium, Hard, or "Adapt to me")**, which looks at your recent quiz scores. There is also a focused test on one topic, offered right after an answer in Ask.
+- **Class**: *Practice quizzes* on topics the class found tricky (the quizzes the professor publishes, not announced as such; taking one also shows the professor where the class is stuck), and *Added to the material*, the answers and notes the professor has added, newest first. No student is identified.
 - **My progress**: one tab per material with quiz scores, topics, oral checks and a "focus next" suggestion.
 
 **For professors**
-- **Concepts to Revisit**: which slide topics the class seems to struggle with, ranked by a **confusion score** that
-  combines several kinds of evidence (who asked, who came back or asked for an explanation, class quiz results, oral
-  checks, whether it kept coming up across days) and shows that evidence, how confident the score is, and how much the
-  ranking changes if the weights change. Many questions alone do not rank a topic high. Under the ranking, the
-  **Content Advisor** suggests what to do about the top topics (rule-based, citing its evidence) and can draft a
-  clarification note or a remedial quiz with the local model. Drafts stay hidden from students until the professor
-  reads, edits and approves them. **Did it help?** then compares each approved action (or one you log by hand,
-  such as re-teaching in class) with what happened to other topics at a similar level over the same days, with an
-  uncertainty range, and says "too early to tell" or "cannot tell" when the data does not support a claim.
-- **Class Insight**: student questions grouped by meaning, with the slides students keep landing on.
-- **Pending Gaps**: questions the notes could not answer. One answer is added to the course material for everyone.
+- **Concepts to Revisit**: a ranked list of the slide topics the class seems to struggle with, with a detail panel for
+  the topic you pick: its **confusion score** (built from who asked, who came back or asked for an explanation, class
+  quiz results, oral checks and whether it kept coming up across days), what stands out, and the evidence. A
+  **"What could I do about this?"** button, pressed only when wanted, shows suggestions (rule-based, each citing its
+  evidence) and lets you draft a clarification note or a remedial quiz with the local model. Drafts stay hidden from
+  students until you read, edit and approve them. The scoring weights can be changed under "Adjust scoring".
+- **Class Insight**: student questions grouped by meaning.
+- **Pending Gaps**: questions the notes could not answer. One answer is added to the course material for everyone, and students see it under Class, "Added to the material".
 - **Class Quizzes**: quizzes on the topics the class keeps asking about, with aggregated (anonymous) results,
   plus a **Question analysis** that shows the wrong answers many students chose (likely misconceptions) and
   flags weak quiz questions. Numbers appear only once at least 5 students have taken a quiz.
@@ -190,7 +188,7 @@ publish_quizzes.py       Pre-generate class quizzes from the command line
 evaluate_router.py       Measure the router (rules vs learned vs hybrid)
 evaluate_item_analysis.py  Check the quiz question analysis against simulated classes with known problems
 evaluate_confusion.py    Check the confusion score against simulated classes with known confusing topics
-evaluate_intervention.py Check the "did it help" comparison against simulated classes where the action works or does nothing
+evaluate_intervention.py Research script for the before/after comparison engine (rag_core/intervention.py), which is not shown in the app
 download_speech_model.py One-time download of the Whisper model
 agents/                  The multi-agent layer (agents, orchestrator, router)
 rag_core/                Shared retrieval layer (loading, search, LLM, PDF export, speech)
@@ -212,7 +210,6 @@ Measured on this project's own data; full details and caveats are in [docs/DESIG
 | Study notes (real Llama 3, 2 topics) | right structure every time; unsupported details are dropped or flagged for checking |
 | Quiz question analysis, 200 simulated classes of 24 | planted shared mistakes found 92% of the time, wrongly reported on ordinary questions 0.04 times per class; faulty answer keys found only 35% of the time (97% with 100 students) |
 | Concept confusion score, 200 simulated classes of 24 (2 of 8 topics planted as confusing, 1 as merely popular) | picks the confusing topics 82 to 100% of the time depending on how strongly confusion shows in behaviour; ranking by number of questions manages 50 to 69% (chance is about 25%) because it picks the popular topic |
-| "Did it help?" check, 30 simulated classes of 48 per setting | when the action does nothing but every topic drifts down anyway, a plain before/after subtraction claims success 73% of the time and the app 0%; when the action really works moderately it is detected 67% of the time (23% if the whole class is also drifting down), so modest real effects are often reported as "no clear difference" |
 | Tests | unit tests for every module (command above) |
 
 These come with real caveats: the router examples and the test recordings were made by the project authors

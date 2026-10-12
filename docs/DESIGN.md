@@ -199,7 +199,10 @@ Read this with care:
 `rag_core/confusion.py` ranks slide topics by how likely the class is struggling with them. The reasoning: 40
 students asking about deadlock does not mean they are confused, they may just be curious. So no single count is
 used. Seven kinds of evidence about the same concept are combined, and the dashboard (**Concepts to Revisit**)
-shows each one next to the score.
+shows the evidence that applies to the topic the teacher picks. The tab is a ranked list on the left and one detail
+panel on the right (score, confidence, what stands out, evidence, any quiz misconception); the suggestions and drafting
+tools sit behind a "What could I do about this?" button and are worked out only when it is pressed, for that topic only.
+The weights are under a collapsed "Adjust scoring" section.
 
 | Signal | Reads as | Needs |
 |---|---|---|
@@ -223,8 +226,9 @@ Design decisions that matter:
 - **Anonymous questions count as questions, never as students.** Most of the old demo questions have no identity.
 - **Questions the notes could not answer are not in the score.** They match no slide, so they cannot belong to a
   concept; they stay in Pending Gaps.
-- **Ranking stability:** the ranking is recomputed under 300 randomly perturbed weight sets, and the page shows how
-  often each concept stays in the top 3. A concept that is first only under one weighting is a weak finding.
+- **Ranking stability:** `rank_stability` recomputes the ranking under 300 randomly perturbed weight sets and reports how
+  often each concept stays in the top 3 (a concept that is first only under one weighting is a weak finding). It is
+  tested and used in the evaluation, but the tab no longer shows it: it was jargon for a teacher.
 - **A concept is one slide topic.** "ACID" and "BASE" slides are separate concepts; merging slides about one idea
   is not done yet.
 
@@ -316,11 +320,15 @@ relation; a concept is one slide topic, so a quiz about BASE can end up under th
 whether an approved action helped (that needs real students before and after); and there is no way to edit a
 published remedial quiz.
 
-### Did it help? (professor)
+### Intervention tracking: did it help? (built and tested, not shown in the app)
 
-`rag_core/intervention.py` closes the loop: for every approved clarification note, published remedial quiz, or action
-the professor logs by hand (re-taught it in class, updated a slide), it compares the topic's confusion score before and
-after, on the **Concepts to Revisit** tab. Subtracting the two scores is not enough, because a topic's score can fall for
+**Status: this was a section of the Concepts to Revisit tab and was removed from the app at the teacher's request, to
+keep the tab simple. The engine (`rag_core/intervention.py`), its 31 tests and `evaluate_intervention.py` remain in the
+repository, unused by the app, and approval times are still recorded in the advice log.** What follows describes the
+engine as built.
+
+`rag_core/intervention.py` compares a topic's confusion score before and after each approved clarification note,
+published remedial quiz, or action logged by hand (re-taught it in class, updated a slide). Subtracting the two scores is not enough, because a topic's score can fall for
 reasons unrelated to what the professor did (the unit winds down, students get used to the material, an exam gets
 close). The comparison is built to avoid those traps:
 
@@ -489,6 +497,32 @@ but no text layer ...", Update library names the files it left out, and `ingest.
 counts the distinct pictures on the first ten pages. A real case: `1.8 SSB Modulator.pdf` has three pages holding
 four distinct images (two block diagrams, two blank rules) and no text at all. OCR could read only the diagram labels,
 not an explanation, so the practical fix is a text version of those notes.
+
+### The student's "Class" section
+
+The teacher's work reaches students in two places, under one **Class** section in the student navigation.
+
+- **Practice quizzes** lists the quizzes the professor has published to the class (scope `class`): never a draft (the
+  Content Advisor's remedial quizzes stay hidden until published) and never another student's personal quiz. It is worded
+  as practice on topics the class found tricky and does not announce who wrote it. A student picks one from a list that
+  shows its topic, number of questions and their own first score ("done, 3/5" or "not taken"), takes it, and sees the
+  usual per-question explanations and sources. The attempt is saved under the student, so these quizzes are also how the
+  professor's Question analysis and the confusion score's quiz signal get their data: before this section existed
+  students had no way to take a published class quiz, so those results could not appear.
+- **Added to the material** lists the professor's answers to questions the notes could not answer (one entry however
+  many students asked it) and approved clarification notes, newest first. They are also in the search index, so a student
+  asking the same thing gets them cited as a "Faculty answer".
+
+Pending Gaps was tested end to end (queue, grouping, answer, resolution of every question in the group, the index, a
+student asking again, a rebuild, an empty answer, a missing index). On the real index a teacher's answer was found first
+for four paraphrases of the original question while an unrelated question still went to the normal slides. A suspected
+weakness (a new similar question arriving while the teacher types could change the answer box and lose the text) could
+not be reproduced: adding any of seven similar questions did not change which question represents the group.
+
+Limits: the title shown to students is the first question of the group, as the student typed it, so a question that
+contains something personal would be shown to the whole class (the teacher cannot edit it yet); a student who later
+types an ID in the same session has the attempt saved under both the session and the ID, which can count them twice in
+the class results; and "Class" does not tell a student when something new has been added.
 
 ### Hand-offs between agents
 

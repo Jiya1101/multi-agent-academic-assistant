@@ -109,8 +109,9 @@ def diagnose(
     attempts: Iterable[Dict[str, Any]] = (),
     embeddings=None,
     top_n: int = 5,
+    only: Optional[str] = None,
 ) -> List[Advice]:
-    """Advice for the `top_n` highest-scoring concepts in `report`, highest first."""
+    """Advice for the `top_n` highest-scoring concepts in `report`, highest first, or just for the concept with key `only`."""
     class_quizzes = [q for q in quizzes if q.get("scope", "class") == "class"]
     analyses = analyze_quizzes(class_quizzes, attempts)
     misconceptions = likely_misconceptions(analyses)
@@ -125,7 +126,8 @@ def diagnose(
     cut = median(c.score for c in report.concepts) if report.concepts else 0.0
 
     out: List[Advice] = []
-    for concept in report.concepts[:top_n]:
+    chosen = [c for c in report.concepts if c.key == only] if only is not None else report.concepts[:top_n]
+    for concept in chosen:
         rs = rows_by_key.get(concept.key, [])
         source, page = where[concept.key]
         landing = Counter(slide_label(r["retrieved"][0]) for r in rs).most_common(MAX_LANDING)

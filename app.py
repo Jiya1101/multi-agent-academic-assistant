@@ -28,7 +28,6 @@ import hashlib
 import re
 import uuid
 from collections import Counter, defaultdict
-from datetime import datetime, time, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -45,14 +44,13 @@ from rag_core.advice_log import (
     add_advice,
     approved_clarifications,
     list_advice,
-    log_action,
     set_status as set_advice_status,
     update_body as update_advice_body,
 )
-from rag_core.confusion import DEFAULT_WEIGHTS, SIGNALS, concept_key, load_and_compute, rank_stability
+from rag_core.confusion import DEFAULT_WEIGHTS, SIGNALS, concept_key, load_and_compute
 from rag_core.embeddings import get_embeddings
 from agents.quiz_generator import BATCH, MAX_QUESTIONS, MIN_QUESTIONS
-from rag_core.insights import cluster_questions, slide_label, summarize_clusters
+from rag_core.insights import cluster_questions, summarize_clusters
 from rag_core.item_analysis import (
     FLAG_HELP,
     KEY_SUSPECT_AT,
@@ -71,7 +69,6 @@ from rag_core.learning_log import (
     record_route_feedback,
     set_quiz_scope,
 )
-from rag_core.intervention import measure_all
 from rag_core.library import delete_material
 from rag_core.loader import describe_unreadable, inspect_pdf, load_all_pdfs, unreadable_pdfs
 from rag_core.normalize import human_title, short_section_title
@@ -84,6 +81,7 @@ from rag_core.query_log import (
     list_queries,
     resolve_gaps,
     resolved_answers,
+    resolved_answers_dated,
 )
 from rag_core.speech import course_vocabulary_hint, get_recognizer
 from rag_core.splitter import split_documents
@@ -1008,6 +1006,7 @@ _SECTION_STATE = {
     "Oral check": ["oral_question_result", "oral_assessment_result", "oral_transcript", "oral_notice", "oral_audio_digest"],
     "Study notes": [],
     "Quiz": ["student_material_quiz", "quiz_focus"],
+    "Class": ["class_quiz_pick", "class_part"],
     "My progress": [],
 }
 _SECTION_PREFIXES = {"Study notes": ("notes_",), "Quiz": ("quizresult_", "recap_")}
@@ -1081,6 +1080,59 @@ def render_ask(vectorstore, student_id) -> None:
             render_student_response(entry["resp"], show_question=False)
 
 
+def _render_practice_quizzes(vectorstore, student_id) -> None:
+    """Quizzes on topics the class found tricky. Taking one also tells the teacher where the class is stuck."""
+    quizzes = list_quizzes(SCOPE_CLASS, DB_DIR)
+    if not quizzes:
+        st.info("No practice quizzes yet.")
+        return
+    st.write("Practice on topics the class has found tricky.")
+    by_id = {q["id"]: q for q in quizzes}
+    first_try = {}
+    for attempt in list_attempts(student_id, DB_DIR):
+        first_try.setdefault(attempt["quiz_id"], attempt)
+
+    def label(quiz_id: int) -> str:
+        quiz = by_id[quiz_id]
+        tried = first_try.get(quiz_id)
+        status = f"done, {tried['correct']}/{tried['total']}" if tried else "not taken"
+        return f"{human_title(quiz['topic'])} - {len(quiz['questions'])} questions - {status}"
+
+    picked = st.selectbox("Practice quiz", list(by_id), format_func=label, key="class_quiz_pick", label_visibility="collapsed")
+    render_quiz(by_id[picked], student_id, "class", vectorstore)
+
+
+def _render_added_material() -> None:
+    """What the teacher has added to the course material: answers to class questions and extra notes, newest first."""
+    items = [
+        {"title": a["question"], "body": a["answer"], "at": a["at"] or ""} for a in resolved_answers_dated(DB_DIR)
+    ] + [
+        {"title": f"Note: {human_title(n['concept'])}", "body": n["body"], "at": n["decided_at"] or ""}
+        for n in list_advice(kind=KIND_CLARIFICATION, status=STATUS_APPROVED, db_dir=DB_DIR)
+    ]
+    if not items:
+        st.info("Nothing has been added yet.")
+        return
+    for item in sorted(items, key=lambda i: i["at"], reverse=True):
+        with st.container(border=True):
+            st.markdown(f"**{item['title']}**")
+            st.write(item["body"])
+            if item["at"]:
+                st.caption(f"Added {item['at'][:10]}")
+
+
+def render_class_section(vectorstore, student_id) -> None:
+    """Class: practice quizzes on what the class found tricky, and what has been added to the material."""
+    part = st.segmented_control(
+        "Class", ["Practice quizzes", "Added to the material"], default="Practice quizzes", key="class_part",
+        label_visibility="collapsed",
+    )
+    if part == "Added to the material":
+        _render_added_material()
+    else:
+        _render_practice_quizzes(vectorstore, student_id)
+
+
 def render_student(student_id) -> None:
     st.title("Academic Assistant")
     st.markdown('<p class="tagline">Ask, practise and track what you have learned from your own study material.</p>', unsafe_allow_html=True)
@@ -1090,7 +1142,7 @@ def render_student(student_id) -> None:
         render_student_material()
         return
 
-    sections = ["Material", "Ask", "Oral check", "Study notes", "Quiz", "My progress"]
+    sections = ["Material", "Ask", "Oral check", "Study notes", "Quiz", "Class", "My progress"]
     # Not st.tabs: code cannot switch tabs, and "Take test" on My progress has to open the Quiz section.
     st.session_state.setdefault("main_nav", "Material")
     chosen = st.segmented_control("Section", sections, key="main_nav", label_visibility="collapsed")
@@ -1114,6 +1166,9 @@ def render_student(student_id) -> None:
 
     if section == "Quiz":
         render_quiz_builder(vectorstore, student_id)
+
+    if section == "Class":
+        render_class_section(vectorstore, student_id)
 
     if section == "My progress":
         if not student_id:
@@ -1168,39 +1223,40 @@ def _render_class_insight() -> None:
             for index in cluster.indices:
                 st.text(f"- {rows[index]['question']}")
 
-    slide_counts = Counter(slide_label(row["retrieved"][0]) for row in rows if row["retrieved"])
-    if slide_counts:
-        st.subheader("Slides students land on most")
-        st.bar_chart(dict(slide_counts.most_common(8)))
+
+def _concept_weights() -> dict:
+    """The scoring weights from the sliders at the bottom of the tab (their starting values before they are touched)."""
+    return {name: st.session_state.get(f"weight_{name}", round(DEFAULT_WEIGHTS[name] * 100)) / 100 for name in SIGNALS}
 
 
-def _render_advice(weights) -> None:
-    """Content Advisor: what the professor could do about the hardest concepts. Nothing here reaches students unapproved."""
+def _toggle_suggestions(key: str) -> None:
+    flag = f"suggestions_open_{key}"
+    st.session_state[flag] = not st.session_state.get(flag, False)
+
+
+def _render_suggestions(c) -> None:
+    """What the teacher could do about one topic. Worked out only now, because the teacher asked."""
     vectorstore = _get_vectorstore()
-    result = _orchestrator().advise_class(_context(vectorstore), top_n=3, weights=weights)
+    result = _orchestrator().advise_class(_context(vectorstore), weights=_concept_weights(), only=c.key)
     advice = result.primary.data["advice"]
-    st.subheader("What you could do about it")
-    st.caption(
-        "The suggestions come from fixed rules applied to the evidence above; no AI model is involved in them. "
-        "Anything the local model drafts (a clarification, a quiz) stays hidden from students until you approve it."
-    )
-    render_trace(result.trace)
-    for a in advice:
-        with st.expander(f"{a.concept} (score {round(a.score)}, {a.confidence.lower()} confidence)"):
-            for finding in a.findings:
-                with st.container(border=True):
-                    st.markdown(f"**{finding.title}**")
-                    st.write(finding.detail)
-                    st.caption(f"Suggestion: {finding.action}")
-            if a.sub_questions:
-                st.markdown("**What students ask**")
-                for question, size in a.sub_questions:
-                    st.text(f"- {question}  ({size})")
-            if a.landing:
-                st.markdown("**Where they land**")
-                for label, count in a.landing:
-                    st.text(f"- {label}  ({count})")
-            _render_advice_actions(a, vectorstore)
+    if not advice:
+        st.info("No suggestions for this topic yet.")
+        return
+    a = advice[0]
+    for finding in a.findings:
+        with st.container(border=True):
+            st.markdown(f"**{finding.title}**")
+            st.write(finding.detail)
+            st.caption(finding.action)
+    if a.sub_questions:
+        st.markdown("**What students ask**")
+        for question, size in a.sub_questions:
+            st.text(f"- {question}  ({size})")
+    if a.landing:
+        st.markdown("**Where they land**")
+        for label, count in a.landing:
+            st.text(f"- {label}  ({count})")
+    _render_advice_actions(a, vectorstore)
 
 
 def _render_advice_actions(a, vectorstore) -> None:
@@ -1209,20 +1265,19 @@ def _render_advice_actions(a, vectorstore) -> None:
         return
     ctx = _context(vectorstore)
     saved = list_advice(concept_key=a.key, db_dir=DB_DIR)
-    st.markdown("**Draft something for students**")
+    st.markdown("**Draft for students**")
 
     # --- clarification note ------------------------------------------------------------------
-    approved = [x for x in saved if x["kind"] == KIND_CLARIFICATION and x["status"] == STATUS_APPROVED]
-    for item in approved:
+    for item in (x for x in saved if x["kind"] == KIND_CLARIFICATION and x["status"] == STATUS_APPROVED):
         with st.container(border=True):
-            st.caption("In the course material (students see it as a Faculty answer):")
+            st.caption("In the course material:")
             st.write(item["body"])
             if st.button("Remove from course material", key=f"unclar_{item['id']}"):
                 remove_clarification(load_vectorstore(DB_DIR, _load_embeddings()), item["concept"], item["body"], DB_DIR)
                 set_advice_status(item["id"], STATUS_DISMISSED, DB_DIR)
                 st.rerun()
-    if st.button("Draft a clarification note (about a minute)", key=f"draft_{a.key}"):
-        with st.spinner("Content Advisor is writing a draft from the course material ..."):
+    if st.button("Draft a clarification note", key=f"draft_{a.key}", help="Takes about a minute."):
+        with st.spinner("Writing a draft from your course material ..."):
             draft = _orchestrator().content_advisor.draft_clarification(a, ctx)
         if draft.data.get("error"):
             st.error(draft.text)
@@ -1231,12 +1286,12 @@ def _render_advice_actions(a, vectorstore) -> None:
             st.rerun()
     for item in (x for x in saved if x["kind"] == KIND_CLARIFICATION and x["status"] == STATUS_DRAFT):
         with st.container(border=True):
-            st.caption("Draft clarification. Read it, correct it, then approve. Students cannot see it yet.")
+            st.caption("Draft: students cannot see it until you approve it.")
             text = st.text_area("Draft", item["body"], key=f"clar_{item['id']}", height=170, label_visibility="collapsed")
             doubtful = _orchestrator().content_advisor.review_text(text, a, ctx)
             if doubtful:
                 st.warning(
-                    "The course material does not clearly support these sentences. Check them before approving:\n\n"
+                    "The course material does not clearly support these sentences:\n\n"
                     + "\n".join(f"- {s}" for s in doubtful)
                 )
             left, right = st.columns(2)
@@ -1255,9 +1310,9 @@ def _render_advice_actions(a, vectorstore) -> None:
 
     # --- remedial quiz -----------------------------------------------------------------------
     for item in (x for x in saved if x["kind"] == KIND_REMEDIAL_QUIZ and x["status"] == STATUS_APPROVED):
-        st.caption(f"Remedial quiz published to the class on {item['decided_at'][:10]}.")
-    if st.button("Write a remedial quiz (2 to 3 minutes)", key=f"quiz_{a.key}"):
-        with st.spinner("Content Advisor -> Quiz Generator ..."):
+        st.caption(f"Remedial quiz published on {item['decided_at'][:10]}.")
+    if st.button("Write a remedial quiz", key=f"quiz_{a.key}", help="Takes 2 to 3 minutes."):
+        with st.spinner("Writing a quiz ..."):
             made = _orchestrator().remedial_quiz(a, ctx)
         quiz_id = made.primary.data.get("quiz_id")
         if quiz_id is None:
@@ -1271,7 +1326,7 @@ def _render_advice_actions(a, vectorstore) -> None:
             set_advice_status(item["id"], STATUS_DISMISSED, DB_DIR)
             continue
         with st.container(border=True):
-            st.caption("Draft remedial quiz. Check every question before publishing. Students cannot see it yet.")
+            st.caption("Draft quiz: students cannot see it until you publish it.")
             for i, q in enumerate(quiz["questions"], start=1):
                 st.markdown(f"**{i}. {q['question']}**")
                 for j, option in enumerate(q["options"]):
@@ -1290,174 +1345,58 @@ def _render_advice_actions(a, vectorstore) -> None:
                 st.rerun()
 
 
-@st.cache_data(show_spinner=False)
-def _measured_effects(fingerprint, weights_key):
-    """Every approved action's before/after result. Cached: each one re-scores the class many times."""
-    return measure_all(DB_DIR, weights=dict(weights_key))
-
-
-def _data_fingerprint():
-    """Changes whenever there is new data to measure (or the hour turns, since 'now' is the end of the after-window)."""
-    return (
-        len(list_queries(db_dir=DB_DIR)), len(list_attempts(db_dir=DB_DIR)), len(list_oral_assessments(db_dir=DB_DIR)),
-        len(list_advice(status=STATUS_APPROVED, db_dir=DB_DIR)), datetime.now().strftime("%Y-%m-%d %H"),
-    )
-
-
-def _action_label(iv) -> str:
-    return {
-        KIND_CLARIFICATION: "Clarification note approved",
-        KIND_REMEDIAL_QUIZ: "Remedial quiz published",
-    }.get(iv.kind, f"You logged: {iv.title}")
-
-
-def _render_effect(effect) -> None:
-    iv = effect.intervention
-    with st.container(border=True):
-        st.markdown(f"**{iv.concept}**: {_action_label(iv)} on {iv.at:%d %b %Y}")
-        if effect.status == "waiting":
-            st.info(effect.message)
-            return
-        low, high = effect.interval if effect.interval else (None, None)
-        if effect.relative is None:
-            st.info(f"{effect.verdict}. {effect.message}")
-        else:
-            body = (
-                f"Score {effect.before:.0f} to {effect.after:.0f} ({effect.change:+.0f}). Untouched topics at a similar "
-                f"level ({effect.n_controls}) changed by {effect.control_change:+.0f} over the same days, so the "
-                f"difference is {effect.relative:+.0f}"
-                + (f" (90% range {low:+.0f} to {high:+.0f})." if effect.interval else ".")
-            )
-            show = {"Fell more than other topics": st.success, "Rose more than other topics": st.warning}.get(
-                effect.verdict, st.info
-            )
-            show(f"**{effect.verdict}.** {body} {effect.message}")
-        st.caption(
-            f"Compared {effect.window_days:.0f} day(s) before with {effect.window_days:.0f} day(s) after, using only "
-            f"evidence that exists on both sides ({', '.join(effect.evidence_kinds)})."
+def _render_concept_detail(c, misconceptions) -> None:
+    """One topic: its score, the one thing that stands out, the evidence, and an optional button for suggestions."""
+    st.subheader(c.concept)
+    st.markdown(f"Score **{round(c.score)}** out of 100, {c.confidence.lower()} confidence")
+    if c.stands_out:
+        st.write(c.stands_out)
+    evidence = [{"Evidence": s.label, "What we saw": s.evidence} for s in c.signals if s.value is not None]
+    if evidence:
+        st.dataframe(evidence, hide_index=True, width="stretch")
+    for q in (m for m in misconceptions if concept_key(m.topic) == c.key):
+        wrong = q.misconception
+        st.markdown(
+            f"Quiz: {wrong.share:.0%} of the class chose \"{wrong.text}\" instead of \"{q.correct_option.text}\" "
+            f"on \"{q.question}\"."
         )
-        st.dataframe(
-            [{"Evidence": c.label, "Before": c.before, "After": c.after} for c in effect.signal_changes],
-            hide_index=True,
-            width="stretch",
-        )
-
-
-def _render_effects(report, weights) -> None:
-    """Did the things the professor did actually move the score? Compared against untouched topics, with a range."""
-    st.subheader("Did it help?")
-    st.caption(
-        "For every clarification note you approved, remedial quiz you published, or action you log here, this compares "
-        "the topic's score before and after, against other topics that started at a similar level, so that anything "
-        "that changed the whole class does not count as your doing. Right after an action there is nothing to compare "
-        "yet. A result is suggestive, never proof: students and lectures change too."
+    is_open = st.session_state.get(f"suggestions_open_{c.key}", False)
+    st.button(
+        "Hide suggestions" if is_open else "What could I do about this?",
+        key=f"suggestions_btn_{c.key}", type="secondary" if is_open else "primary",
+        on_click=_toggle_suggestions, args=(c.key,),
     )
-    with st.expander("Log something you did outside the app (for example, re-taught it in class)"):
-        names = {c.concept: c for c in report.concepts}
-        topic = st.selectbox("Topic", list(names), key="action_topic")
-        note = st.text_input("What did you do?", placeholder="Re-taught it with a worked example", key="action_note")
-        day = st.date_input("When", value=datetime.now().date(), key="action_date")
-        if st.button("Save", key="action_save"):
-            if not note.strip():
-                st.warning("Say what you did first.")
-            else:
-                when = datetime.combine(day, time(9, 0), tzinfo=timezone.utc).isoformat(timespec="seconds")
-                log_action(names[topic].key, topic, note.strip(), when, DB_DIR)
-                st.toast("Saved. It will be measured once there is data after that date.")
-                st.rerun()
-    effects = _measured_effects(_data_fingerprint(), tuple(sorted(weights.items())))
-    if not effects:
-        st.info("Nothing to measure yet. Approve a clarification note or remedial quiz above, or log an action.")
-    for effect in effects:
-        _render_effect(effect)
-
-
-def _signal_detail(signal, class_means) -> str:
-    if signal.value is not None:
-        return signal.evidence
-    if signal.name in class_means:
-        return f"class average used ({class_means[signal.name]:.0%})"
-    return "no data for this signal anywhere in the class"
+    if is_open:
+        _render_suggestions(c)
 
 
 def _render_concept_confusion() -> None:
-    """Which concepts to revisit first: several kinds of evidence combined, shown with that evidence."""
-    st.caption(
-        "A concept is a slide topic. Many questions about it do not by themselves mean students are confused, so "
-        "this combines several kinds of evidence: how many students asked, whether they came back or asked to have "
-        "it explained, how they did on the class quiz, oral checks, and whether it kept coming up across days. "
-        "It is a ranking aid for deciding what to revisit first, not a measurement of understanding."
-    )
-    with st.expander("How much each kind of evidence counts"):
-        st.caption("Starting values are judgment calls. Change them and watch the ranking and its stability.")
-        weights = {
-            name: st.slider(label, 0, 100, round(DEFAULT_WEIGHTS[name] * 100), key=f"weight_{name}")
-            for name, (label, _w) in SIGNALS.items()
-        }
-    report = load_and_compute(DB_DIR, {name: v / 100 for name, v in weights.items()})
+    """Topics ranked by how much the class seems to struggle with them: pick one to see why and what to do."""
+    report = load_and_compute(DB_DIR, _concept_weights())
     if not report.concepts:
-        st.info(
-            "Not enough data yet. A concept needs at least one kind of evidence from enough different students "
-            f"(at least {MIN_COHORT}) or enough questions."
-        )
+        st.info("No topics have enough data yet.")
     else:
-        stability = rank_stability(report)
-        st.dataframe(
-            [
-                {
-                    "Rank": rank,
-                    "Concept": c.concept,
-                    "Confusion score": round(c.score),
-                    "Confidence": c.confidence,
-                    "Stays in top 3 when weights change": f"{stability[c.key].top_share:.0%}",
-                    "What stands out": c.stands_out or "Nothing above the class average",
-                }
-                for rank, c in enumerate(report.concepts, start=1)
-            ],
-            hide_index=True,
-            width="stretch",
+        keys = [c.key for c in report.concepts]
+        by_key = {c.key: c for c in report.concepts}
+        misconceptions = likely_misconceptions(
+            analyze_quizzes(list_quizzes(SCOPE_CLASS, DB_DIR), list_attempts(db_dir=DB_DIR))
         )
-        st.caption(
-            "Confidence: Low means one kind of evidence backs the score, Medium two, High three (questions, quizzes, "
-            "oral checks). A signal with too little data is filled in with the class average, so missing data never "
-            "lowers or raises a concept's score on its own."
-        )
+        left, right = st.columns([1, 2], gap="large")
+        with left:
+            picked = st.radio(
+                "Topics", keys, key="concept_pick", label_visibility="collapsed",
+                format_func=lambda k: f"{keys.index(k) + 1}. {by_key[k].concept} ({round(by_key[k].score)})",
+            )
+        with right:
+            _render_concept_detail(by_key[picked], misconceptions)
 
-        quizzes = list_quizzes(SCOPE_CLASS, DB_DIR)
-        found = likely_misconceptions(analyze_quizzes(quizzes, list_attempts(db_dir=DB_DIR)))
-        for rank, c in enumerate(report.concepts, start=1):
-            with st.expander(f"{rank}. {c.concept} (score {round(c.score)}, {c.confidence.lower()} confidence)"):
-                st.dataframe(
-                    [
-                        {
-                            "Evidence": s.label,
-                            "Weight": f"{s.weight:.0%}",
-                            "Reading": f"{s.value:.0%}" if s.value is not None else "Not enough data",
-                            "Detail": _signal_detail(s, report.means),
-                        }
-                        for s in c.signals
-                    ],
-                    hide_index=True,
-                    width="stretch",
-                )
-                for q in (m for m in found if concept_key(m.topic) == c.key):
-                    wrong = q.misconception
-                    st.markdown(
-                        f"Quiz finding: {wrong.share:.0%} of the class chose \"{wrong.text}\" instead of "
-                        f"\"{q.correct_option.text}\" on \"{q.question}\"."
-                    )
-    if report.concepts:
-        _render_advice({name: v / 100 for name, v in weights.items()})
-        _render_effects(report, {name: v / 100 for name, v in weights.items()})
     if report.unscored:
-        st.caption(
-            "Asked about but too little evidence to score: "
-            + "; ".join(f"{name} ({n})" for name, n in report.unscored[:10])
-        )
-    st.caption(
-        f"Based on {report.active_students} identified student(s). Questions the notes could not answer have no slide, "
-        "so they are in Pending Gaps instead. Slides on the same idea are not merged yet."
-    )
+        with st.expander(f"Topics without enough data ({len(report.unscored)})"):
+            for name, n in report.unscored[:15]:
+                st.text(f"- {name} ({n} question(s))")
+    with st.expander("Adjust scoring"):
+        for name, (label, _weight) in SIGNALS.items():
+            st.slider(label, 0, 100, round(DEFAULT_WEIGHTS[name] * 100), key=f"weight_{name}")
 
 
 def _render_pending_gaps() -> None:

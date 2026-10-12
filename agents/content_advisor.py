@@ -128,9 +128,10 @@ class ContentAdvisor(Agent):
         top_n: int = 3,
         report=None,
         weights: Optional[Dict[str, float]] = None,
+        only: Optional[str] = None,
         **_,
     ) -> AgentResult:
-        """Diagnose the top concepts. `report` (from Faculty Insight) is used if given, else it is computed."""
+        """Diagnose the top concepts, or just the one with key `only`. `report` (from Faculty Insight) is used if given."""
         rows = list_queries(db_dir=ctx.db_dir)
         quizzes = list_quizzes(db_dir=ctx.db_dir)
         attempts = list_attempts(db_dir=ctx.db_dir)
@@ -141,7 +142,7 @@ class ContentAdvisor(Agent):
                 agent=self.name, kind="advice", grounded=False,
                 text="Not enough evidence yet to suggest anything.", data={"advice": [], "report": report},
             )
-        advice = diagnose(report, rows, quizzes, attempts, ctx.embeddings or get_embeddings(), top_n)
+        advice = diagnose(report, rows, quizzes, attempts, ctx.embeddings or get_embeddings(), top_n, only)
         return AgentResult(
             agent=self.name, kind="advice", text=f"Suggestions for {len(advice)} concept(s).",
             data={"advice": advice, "report": report},
