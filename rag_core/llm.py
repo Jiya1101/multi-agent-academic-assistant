@@ -23,6 +23,18 @@ def get_llm(
 
 
 @lru_cache(maxsize=1)
+def get_rewrite_llm(
+    model: str = OLLAMA_MODEL,
+    base_url: str = OLLAMA_BASE_URL,
+) -> ChatOllama:
+    """
+    Client for rewriting a follow-up question as a standalone one: no randomness, and a short reply cap so
+    it cannot ramble or start answering (the rewrite is one question of a few words).
+    """
+    return ChatOllama(model=model, base_url=base_url, temperature=0.0, num_predict=80)
+
+
+@lru_cache(maxsize=1)
 def get_json_llm(
     model: str = OLLAMA_MODEL,
     base_url: str = OLLAMA_BASE_URL,

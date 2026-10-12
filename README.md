@@ -14,11 +14,11 @@ Built as a B.Tech project: *Multi-Agent AI Framework for Personalized Academic A
 ## What it does
 
 **For students**
-- **Material**: add PDFs, choose what you are studying once (every section uses it), and delete a file together with the progress tied to it.
-- **Ask** questions about the material (by typing or **speaking**); get a short, structured answer. A message with two questions gets both answered.
+- **Material**: add PDFs, choose what you are studying once (every section uses it), and delete a file together with the progress tied to it. A PDF with no readable text (a scan, or made of pictures) is flagged with the reason instead of sitting there "needing an update".
+- **Ask** questions about the material (by typing or **speaking**); get a short, structured answer. A message with two questions gets both answered. **Follow-ups work**: "why is that?" or "give an example" is understood from your last answer, and you are shown how it was understood.
 - **Oral check**: a spoken question on one of the material's main headings, a different one each time. You get a content score, the key points you missed, the full model answer and pause/fluency metrics.
 - **Study notes**: heading-wise notes (definition, key points, use case when the slides give one), as a **downloadable PDF**.
-- **Quiz**: a new set of multiple-choice questions every time (definitions, abbreviations, true statements, which topic), plus a focused test on one topic.
+- **Quiz**: a new set of multiple-choice questions every time (definitions, abbreviations, true statements, which topic). You choose **how many questions (1 to 15) and how hard (Easy, Medium, Hard, or "Adapt to me")**, which looks at your recent quiz scores. There is also a focused test on one topic, offered right after an answer in Ask.
 - **My progress**: one tab per material with quiz scores, topics, oral checks and a "focus next" suggestion.
 
 **For professors**
@@ -66,7 +66,7 @@ made in the app. How it all fits together is in [docs/DESIGN.md](docs/DESIGN.md)
 - **[Ollama](https://ollama.com/download)** installed and running
 - About **10 GB of free disk** (Llama 3 is 4.7 GB, the optional voice model about 1 GB, plus Python packages)
 - At least 8 GB of RAM (Llama 3 alone uses about 5 GB while it runs). A GPU is optional: on a CPU, an
-  answer takes about a minute and a quiz or a note topic 2 to 3 minutes.
+  answer takes about a minute, a note topic 2 to 3 minutes, and every 5 quiz questions 3 to 6 minutes.
 
 ### Install and run
 
@@ -173,7 +173,7 @@ if you index very different material.
 | Connection refused / "could not connect" when asking | Ollama is not running. Start the Ollama app, or run `ollama serve`. |
 | `model "llama3" not found` | Run `ollama pull llama3`. |
 | "No course material has been indexed yet" | Add PDFs to `data/` and run `python ingest.py` (or use the Course Material tab). |
-| "No extractable text was found" | The PDF is scanned or image-only. Use a text-based PDF. |
+| "No extractable text was found", or a file shows "No readable text" in the library | The PDF is scanned or made of pictures, so there is nothing to read; updating the library cannot change that. Use a text version of the notes. |
 | Answers are slow | Normal on a CPU. A GPU makes Ollama much faster. |
 | Voice: "Could not transcribe" | Run `python download_speech_model.py` once, then try again. |
 | Voice: the recorder does nothing | Allow microphone access for `localhost` in the browser; try a normal browser window. |

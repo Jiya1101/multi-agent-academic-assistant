@@ -33,7 +33,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from agents import AgentContext, Orchestrator
+from agents import AgentContext, Orchestrator, remember, turn_from
 from agents.routing import ROUTE_LABELS
 from rag_core.config import DATA_DIR, DB_DIR, FACULTY_SOURCE_NAME, MIN_COHORT, TOP_K
 from rag_core.advice_log import (
@@ -51,6 +51,7 @@ from rag_core.advice_log import (
 )
 from rag_core.confusion import DEFAULT_WEIGHTS, SIGNALS, concept_key, load_and_compute, rank_stability
 from rag_core.embeddings import get_embeddings
+from agents.quiz_generator import BATCH, MAX_QUESTIONS, MIN_QUESTIONS
 from rag_core.insights import cluster_questions, slide_label, summarize_clusters
 from rag_core.item_analysis import (
     FLAG_HELP,
@@ -72,7 +73,7 @@ from rag_core.learning_log import (
 )
 from rag_core.intervention import measure_all
 from rag_core.library import delete_material
-from rag_core.loader import load_all_pdfs
+from rag_core.loader import describe_unreadable, inspect_pdf, load_all_pdfs, unreadable_pdfs
 from rag_core.normalize import human_title, short_section_title
 from rag_core.oral_assessment import list_oral_assessments
 from rag_core.pdf_export import CHECK_LEGEND, CHECK_MARK, notes_to_pdf, source_line
@@ -202,6 +203,12 @@ def _context(vectorstore, student_id=None, sources=None) -> AgentContext:
     )
 
 
+@st.cache_data(show_spinner=False)
+def _pdf_status(name: str, modified_ns: int):
+    """Whether a PDF in data/ has readable text. Cached per file version (the time is part of the key)."""
+    return inspect_pdf(DATA_DIR / name)
+
+
 def _run_ingestion() -> None:
     """Extract -> chunk -> embed -> build FAISS -> persist, from data/ PDFs."""
     with st.spinner("Extracting text from PDFs ..."):
@@ -210,6 +217,11 @@ def _run_ingestion() -> None:
     if not documents:
         st.warning("No PDFs found in the data folder. Upload one first.")
         return
+
+    # Say so plainly about any file that cannot be read, instead of silently leaving it out of the index.
+    skipped = unreadable_pdfs(DATA_DIR)
+    for name, status in skipped.items():
+        st.warning(f"{_nice_name(name)} was left out. {describe_unreadable(status)}")
 
     with st.spinner(f"Chunking {len(documents)} page(s) ..."):
         chunks = split_documents(documents)
@@ -376,6 +388,9 @@ def render_quiz(quiz: dict, student_id, key: str, vectorstore) -> None:
     graded = st.session_state.get(result_key)
 
     st.subheader(f"Quiz: {human_title(quiz['topic'])}")
+    level = next((q.get("level") for q in quiz["questions"] if q.get("level")), None)
+    if level:
+        st.caption(f"Difficulty: {level.capitalize()}. That is what the questions were written to be; it is not measured.")
     with st.form(f"quizform_{quiz_key}"):
         picks = []
         for i, q in enumerate(quiz["questions"]):
@@ -608,11 +623,12 @@ def _render_answer_text(text: str) -> None:
         st.markdown(cleaned)
 
 
-def render_student_response(resp) -> None:
+def render_student_response(resp, show_question: bool = True) -> None:
     for result in resp.results:
         if result.kind in ("answer", "explanation"):
-            st.subheader("Question")
-            st.write(result.data.get("question", ""))
+            if show_question:
+                st.subheader("Question")
+                st.write(result.data.get("question", ""))
             st.subheader("Answer" if result.kind == "answer" else "Explanation")
             _render_answer_text(result.text)
         elif result.kind == "gap":
@@ -874,7 +890,11 @@ def render_student_material(vectorstore=None) -> None:
                         on_click=lambda n=name: st.session_state.update(confirm_delete=n),
                     )
                     if name not in ready:
-                        st.caption("Needs an update before you can use it")
+                        status = _pdf_status(name, (DATA_DIR / name).stat().st_mtime_ns)
+                        if status.readable:
+                            st.caption("Needs an update before you can use it")
+                        else:
+                            st.warning(describe_unreadable(status))
                     else:
                         st.button(
                             "✓ Studying" if name in active else "Study this",
@@ -883,12 +903,37 @@ def render_student_material(vectorstore=None) -> None:
                         )
 
 
+def _quiz_options(vectorstore, student_id) -> tuple:
+    """How many questions and how hard. 'Adapt to me' asks the Progress Tracker, which looks at recent quiz scores."""
+    left, right = st.columns([1, 1.6], gap="large")
+    count = left.slider("Number of questions", MIN_QUESTIONS, MAX_QUESTIONS, 5, key="quiz_count")
+    choice = right.radio("Difficulty", ["Easy", "Medium", "Hard", "Adapt to me"], index=1, horizontal=True, key="quiz_level_choice")
+    if choice == "Adapt to me":
+        level, why = _orchestrator().progress_tracker.suggested_difficulty(_context(vectorstore, student_id))
+        right.caption(why)
+    else:
+        level = choice.lower()
+        right.caption(
+            {"easy": "Direct questions about one fact, with clearly different wrong answers.",
+             "medium": "A mix of recall and understanding questions.",
+             "hard": "Why, how-does-it-differ and which-is-NOT questions. A small AI model gets the answer wrong more "
+                     "often on these, so check any answer that looks odd against the slide named under it."}[level]
+        )
+    batches = -(-count // BATCH)
+    st.caption(
+        f"The local AI model writes about {BATCH} questions at a time, so {count} question(s) take roughly "
+        f"{3 * batches} to {6 * batches} minute(s) on a computer without a graphics card."
+    )
+    return count, level
+
+
 def render_quiz_builder(vectorstore, student_id) -> None:
-    st.write("A short quiz from your material. Every new quiz asks different questions.")
+    st.write("A quiz from your material. Choose how many questions and how hard; every new quiz asks different questions.")
     sources = _library(vectorstore)
     chosen_files = _material_gate()
     if not chosen_files:
         return
+    n_questions, difficulty = _quiz_options(vectorstore, student_id)
 
     def generate(focus=None) -> None:
         st.session_state["quiz_focus"] = focus
@@ -897,7 +942,8 @@ def render_quiz_builder(vectorstore, student_id) -> None:
         with st.spinner("Quiz Generator is writing questions from the selected material ..."):
             result = _orchestrator().quiz_generator.run_from_material(
                 _context(vectorstore, student_id, scope),
-                n_questions=5,
+                n_questions=n_questions,
+                difficulty=difficulty,
                 scope=SCOPE_PERSONAL,
                 topic=_material_label(chosen_files),
                 avoid=seen,  # a new quiz does not repeat the questions of earlier ones
@@ -926,6 +972,23 @@ def render_quiz_builder(vectorstore, student_id) -> None:
         st.warning(result.text)
         return
     quiz = get_quiz(result.data["quiz_id"], DB_DIR)
+    written, requested = result.data.get("written", 0), result.data.get("requested", 0)
+    if written < requested:
+        st.info(
+            f"You asked for {requested} questions but the selected material only gave {written} distinct ones. "
+            "Choose more material, or fewer questions."
+        )
+    if result.data.get("discarded"):
+        st.caption(
+            f"{result.data['discarded']} question(s) the AI wrote were thrown away because the slide did not back "
+            "their answer."
+        )
+    by_rules = written - result.data.get("from_model", written)
+    if by_rules > 0:
+        st.caption(
+            f"{by_rules} question(s) were written by the built-in rules because the AI model did not supply enough; "
+            "they tend to be plainer."
+        )
     render_quiz(quiz, student_id, "personal_material", vectorstore)
     if st.session_state.get(f"quizresult_personal_material_{quiz['id']}") is not None:
         if st.button("Take a new quiz", key="quiz_retake"):
@@ -941,7 +1004,7 @@ def render_quiz_builder(vectorstore, student_id) -> None:
 # --------------------------------------------------------------------------- #
 # What each section keeps in the session; cleared when the student leaves the section so it opens empty next time.
 _SECTION_STATE = {
-    "Ask": ["response", "auto_ask_pending", "voice_notice", "ask_audio_digest", "ask_message"],
+    "Ask": ["response", "chat", "chat_history", "clear_ask_box", "auto_ask_pending", "voice_notice", "ask_audio_digest", "ask_message"],
     "Oral check": ["oral_question_result", "oral_assessment_result", "oral_transcript", "oral_notice", "oral_audio_digest"],
     "Study notes": [],
     "Quiz": ["student_material_quiz", "quiz_focus"],
@@ -955,6 +1018,67 @@ def _clear_section(section: str) -> None:
         st.session_state.pop(key, None)
     for key in [k for k in st.session_state if k.startswith(_SECTION_PREFIXES.get(section, ("\0",)))]:
         st.session_state.pop(key, None)
+
+
+def _new_conversation() -> None:
+    for key in ("chat", "chat_history", "response"):
+        st.session_state.pop(key, None)
+
+
+def render_ask(vectorstore, student_id) -> None:
+    """
+    Ask a question, and follow up on the answer. The last answered question is remembered for the session, so
+    "what about its disadvantages?" is understood from it (agents/conversation.py), and the student is always
+    shown how a follow-up was understood. Earlier answers stay on the page, newest first.
+    """
+    st.write(
+        "Ask a question about your material. You can type it, or speak and check the text before asking. "
+        "You can follow up on an answer, for example \"why is that?\" or \"give an example\"."
+    )
+    indexed_sources = _library(vectorstore)
+    selected = _material_gate()
+    render_voice_input(vectorstore)
+    if st.session_state.pop("clear_ask_box", False):
+        st.session_state["ask_message"] = ""   # a sent message leaves the box empty for the next one
+    message = st.text_input("Your message", key="ask_message", placeholder="e.g. What is backpropagation?")
+
+    auto_ask = st.session_state.pop("auto_ask_pending", False)
+    if st.button("Ask", type="primary") or auto_ask:
+        if not selected:
+            st.warning("Choose your material first (sidebar).")
+        elif not message.strip():
+            st.warning("Please enter a message first.")
+        else:
+            # Filtering is only needed for a strict subset of files.
+            scope = _scope_for_selection(selected, indexed_sources)
+            context = _context(vectorstore, student_id, scope)
+            context.history = st.session_state.get("chat_history", [])
+            with st.spinner("Looking through your material ..."):
+                resp = _orchestrator().handle(message, context)
+            st.session_state.setdefault("chat", []).append({"message": message, "resp": resp})
+            st.session_state["chat_history"] = remember(context.history, turn_from(resp))
+            st.session_state["response"] = resp
+            st.session_state["clear_ask_box"] = True
+            st.rerun()
+
+    chat = st.session_state.get("chat", [])
+    if not chat:
+        return
+    st.button("New conversation", key="ask_new", on_click=_new_conversation,
+              help="Forget what was asked so far, so the next question is not read as a follow-up.")
+    latest = turn_from(chat[-1]["resp"])
+    if latest and latest.grounded and latest.topic and latest.file:
+        st.button(
+            f"Test me on {human_title(latest.topic)}", key="ask_test_me", on_click=_request_topic_test,
+            args=(latest.file, latest.topic),
+            help="Asking shows what you are curious about; a short quiz shows what you have understood.",
+        )
+    for number in range(len(chat), 0, -1):                      # newest first, so the answer sits under the box
+        entry = chat[number - 1]
+        with st.expander(f"{number}. {entry['message']}", expanded=number == len(chat)):
+            if entry["resp"].understood_as:
+                st.caption(f"Understood as: \"{entry['resp'].understood_as}\"")
+            render_student_response(entry["resp"], show_question=False)
 
 
 def render_student(student_id) -> None:
@@ -980,28 +1104,7 @@ def render_student(student_id) -> None:
         render_student_material(vectorstore)
 
     if section == "Ask":
-        st.write("Ask a question about your material. You can type it, or speak and check the text before asking.")
-        indexed_sources = _library(vectorstore)
-        selected = _material_gate()
-        render_voice_input(vectorstore)
-        message = st.text_input("Your message", key="ask_message", placeholder="e.g. What is backpropagation?")
-
-        auto_ask = st.session_state.pop("auto_ask_pending", False)
-        if st.button("Ask", type="primary") or auto_ask:
-            if not selected:
-                st.warning("Choose your material first (sidebar).")
-            elif not message.strip():
-                st.warning("Please enter a message first.")
-            else:
-                # Filtering is only needed for a strict subset of files.
-                scope = _scope_for_selection(selected, indexed_sources)
-                with st.spinner("Looking through your material ..."):
-                    st.session_state["response"] = _orchestrator().handle(
-                        message, _context(vectorstore, student_id, scope)
-                    )
-
-        if "response" in st.session_state:
-            render_student_response(st.session_state["response"])
+        render_ask(vectorstore, student_id)
 
     if section == "Study notes":
         render_notes_builder(vectorstore, student_id, "student", files=_material_gate())
@@ -1559,7 +1662,8 @@ def _render_course_material() -> None:
     existing_pdfs = sorted(p.name for p in DATA_DIR.glob("*.pdf"))
     st.caption(f"{len(existing_pdfs)} PDF(s) currently in data/:")
     for name in existing_pdfs:
-        st.text(f"- {name}")
+        status = _pdf_status(name, (DATA_DIR / name).stat().st_mtime_ns)
+        st.text(f"- {name}" + ("" if status.readable else "   (no readable text: not usable)"))
 
     if st.button("Build / Rebuild Index"):
         _run_ingestion()

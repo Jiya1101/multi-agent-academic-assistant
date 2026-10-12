@@ -381,6 +381,115 @@ the log), with six deliberate breaks of the method's safeguards, all caught. The
 temporary database holding a simulated class where the action worked (score 76 to 50, similar topics -4, difference
 -22, 90% range -36 to -10), and the log-an-action form was exercised, with the real database untouched.
 
+### Follow-up questions in Ask
+
+Before this, every message was answered alone. "What about its disadvantages?" was searched for as typed, matched
+nothing, and got "not covered", because "its" means nothing without the question before it. Follow-ups now work
+(`agents/conversation.py`), in a way that stays visible and cheap:
+
+1. Each answered question is remembered for the session as a `Turn` (what was typed, what it was understood as, its
+   slide topic and file). Only the **last answered** turn is used; there is no long memory.
+2. A message counts as a follow-up if it opens with a continuation word (and, why, what about, give an example, ...)
+   or points back with it / this / that / they, and is at most 18 words.
+3. **A message that stands on its own is never rewritten.** It stands on its own if searching the notes with it alone
+   already finds a match at distance 1.0 or less, so "Why does ACID guarantee atomicity ...?" is left exactly as
+   typed even though it starts with "why". The 1.0 comes from a small real test (see below), not from a large tuning set.
+4. A follow-up is rewritten as a standalone question. Llama 3 does this with a one-line prompt (temperature 0, reply
+   capped at 80 tokens) and the result is accepted only if it is a short question that still touches the earlier
+   topic. Otherwise, or if the model is unavailable, the topic is simply joined on:
+   "What about its disadvantages (about Ring-Based Algorithm)?".
+5. The student always sees "Understood as: ..." under the thread entry. Nothing is rewritten after a question the
+   notes could not answer, since there is nothing to refer to.
+
+The rewritten question is what is routed, answered and **logged**, so the professor's grouping by meaning sees a real
+question instead of "what about it?"; the original wording is kept in `original_question`, and `follow_up_of` now holds
+the true earlier question rather than a guess from the topic. The Ask screen shows a thread (newest first), a "New
+conversation" button, and, after a grounded answer, a "Test me on <topic>" button that goes straight to a quiz on it.
+
+**How is the student's performance gauged, then?** Asking is not a measure of understanding, and we do not treat it as
+one. Questions show curiosity and where a student keeps coming back (that feeds the teacher's confusion score and the
+"needs practice" label on My progress). Understanding is measured by what a student **does**: quiz scores and oral checks
+feed the Progress Tracker, which also now picks quiz difficulty from the last three quizzes. The "Test me" button links
+the two: a student who has just asked about a topic can be tested on it in one click.
+
+**What a real test showed** (`Module 4.pdf` index, previous question "What is the difference between ACID and BASE?",
+real Llama 3, 8 follow-ups and 6 stand-alone questions). Most follow-ups were rewritten sensibly: "Is it used in real
+systems?" became "Is the ACID database consistency model used in real systems?", and "Give an example" became "What is an
+example of a database that uses the ACID consistency model?". Some were weaker: "How does BASE handle that?" became "How
+does the BASE consistency model handle the difference between ACID and BASE?", and "What about its disadvantages?" kept
+only ACID and dropped BASE. A rewrite also changes the kind of help: "Can you explain that more simply?" became a question,
+so it is answered by the Doubt Resolver, not the Concept Explainer's beginner mode. And the first cut-off (0.85) was wrong:
+the stand-alone question "How does Spark recompute lost data?" scored 0.86, was treated as a follow-up, and had the ACID
+topic attached to it. The real stand-alone questions scored up to 0.86 and the follow-ups 1.15 or more, so the cut-off was
+moved to 1.0. Fourteen messages is a very small sample.
+
+Limits: the cut-off is a judgment from that small test; a poor rewrite is possible (the student is shown it and can
+retype); a reference such as "the second one" is caught only by a fixed list of phrases; English only; each rewritten
+follow-up costs about 3 to 11 seconds of the local model before the answer.
+
+### Quiz size and difficulty
+
+A student chooses 1 to 15 questions and Easy, Medium, Hard or "Adapt to me". The local model writes about five questions
+per reply, so a bigger quiz is requested in batches of five from fresh samples of the material, never repeating a
+question; if the model falls short or is offline, the built-in rule-based writer tops up the rest, and the screen says
+how many questions it wrote. "Adapt to me" asks the Progress Tracker: 80% or more on the last three quizzes gives Hard,
+below 50% Easy, otherwise Medium (no history: Medium, and it says so).
+
+**Difficulty is the writer's intent, not a measurement.** For the model it is a sentence in the prompt (Easy: direct
+recall with clearly different wrong answers; Hard: comparison and "which is NOT true" with look-alike wrong answers).
+For the rule-based writer it changes the mix (Easy leans on what-is, what-does-it-stand-for and which-topic questions;
+Hard leans on true-statement questions) and, for Hard, picks the wrong options that share the most wording with the
+right one. Whether a question really was hard shows only after students answer it, and the professor's Question
+analysis reports that. A Hard quiz from the rule-based writer is harder only in the distractors it picks; it cannot
+write reasoning questions.
+
+**What real Llama 3 output showed** (`Module 4.pdf`). A first Hard request ("make it hard") produced mostly plain "What is
+the main ...?" recall questions: the model largely ignored it, and mainly changed the wrong options. Replacing that with a
+concrete quota ("at least half must be Why / How does X differ from Y / Which is NOT / What would happen if; no plain What
+is X") made all five questions of the next run reasoning-style. But the answer keys then got worse. Checked against the
+slides, one "Which of these is NOT a benefit of Amazon Dynamo DB?" question had no correct answer at all (the slide lists
+all four options as benefits), and two more keyed answers were not backed by the slide; two of five were sound. A small
+model invents false options badly, so harder question styles cost accuracy.
+
+So a model-written question is now kept only if its keyed answer is backed by the slide it cites (`key_is_backed`): at
+least half of the keyed option's content words must appear in that slide; for a "which is NOT ..." question it is
+reversed (the keyed option must be the one the slide does not back, and the other three must be). On those four real
+cases it separates the good from the bad (the keyed answers of the doubtful ones scored 0.25 to 0.33, the sound one 0.86,
+and the NOT question had every option at 1.0). Discarded questions are replaced by the rule-based writer and the screen
+says how many were thrown away. Caveats: the check was designed after seeing those failures, so four cases is a thin
+basis; it is word overlap, so it cannot tell a true statement from a false one that reuses the slide's words, and it will
+reject some good questions whose keyed answer is a paraphrase. It applies to the student's quiz, not the professor's
+class quizzes.
+
+A second real Hard run with the same settings (different random slides, 390 seconds for 5 questions) is the more sobering
+data point: nothing was discarded, but only about 2 of the 5 questions were reasoning-style ("What would happen if one of
+the transactions fails ...?"); the rest were plain recall ("What is the purpose of read replicas ...?"), and one had two
+defensible answers (the term "NoSQL" is attributed to both Carlo Strozzi and Eric Evans, and both were options). Two runs
+is a tiny sample, but it shows the Hard instruction is followed inconsistently and that the key check does not catch a
+question with two right answers; that is what the professor's Question analysis (misconceptions, "check the answer key")
+is for once students have taken the quiz. The Hard setting therefore remains a request, not a guarantee.
+
+### How many passages are retrieved (K)
+
+Answers use a fixed `TOP_K = 4` passages (`rag_core/config.py`). Three things make it less rigid than that sounds: a
+message with several questions is split and each part retrieves its own 4; for "types of X" questions the complete list
+from the slides is added; and the relevance check looks only at the single best passage (1.15), while the other three
+are taken as they come. It is **not** adaptive to the question: a question that needs one passage and one that needs six
+both get four. Other features use their own sizes (notes 5, clarification drafts up to 6). Making K adaptive (for
+example, keep every passage within a margin of the best score, between 2 and 6) is a reasonable next step, but it
+should be evaluated on real questions first, because more passages mean a slower and sometimes less focused answer.
+
+### PDFs with no readable text
+
+A scanned PDF or one made only of pictures has no text layer, so nothing can be indexed from it however often the
+library is updated, and the app has no OCR. Previously such a file was silently skipped and the library kept saying
+"Needs an update before you can use it", which looked as if pressing the button should work. `inspect_pdf` in
+`rag_core/loader.py` now checks each file, the library shows "No readable text: this PDF has N pages and M pictures
+but no text layer ...", Update library names the files it left out, and `ingest.py` prints the same warning. The check
+counts the distinct pictures on the first ten pages. A real case: `1.8 SSB Modulator.pdf` has three pages holding
+four distinct images (two block diagrams, two blank rules) and no text at all. OCR could read only the diagram labels,
+not an explanation, so the practical fix is a text version of those notes.
+
 ### Hand-offs between agents
 
 - **Doubt Resolver / Concept Explainer / Note Generator -> Gap Handler**: the

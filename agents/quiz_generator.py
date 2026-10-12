@@ -18,7 +18,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from agents.base import Agent, AgentContext, AgentResult
-from agents.note_generator import major_headings
+from agents.note_generator import _stems, major_headings, support
 from rag_core.config import FACULTY_SOURCE_NAME
 from rag_core.chain import NOT_COVERED_MESSAGE, format_context, retrieve
 from rag_core.insights import topic_title
@@ -31,6 +31,7 @@ course-note context below.
 
 Write exactly {n} questions about: {topic}
 {focus_note}
+{level_note}
 
 Rules:
 - Each question must be answerable from the context alone. Do not use outside knowledge.
@@ -55,6 +56,60 @@ Return ONLY JSON in exactly this shape:
 """
 
 _PROMPT = ChatPromptTemplate.from_messages([("system", _SYSTEM), ("human", "Write the quiz.")])
+
+# Difficulty is the writer's INTENT, set by the kind of question and how close the wrong options are. It is not a
+# measured property: whether a question really was hard shows only after students answer it (the professor's
+# Question analysis reports that).
+DIFFICULTIES = ("easy", "medium", "hard")
+DEFAULT_DIFFICULTY = "medium"
+MIN_QUESTIONS, MAX_QUESTIONS = 1, 15
+BATCH = 5                    # questions asked of the local model per call; its reply is capped at about this many
+
+LEVEL_NOTES = {
+    "easy": (
+        "Difficulty: EASY. Ask direct recall questions about one fact, such as \"What is X?\" or \"What does X "
+        "stand for?\". The wrong options must be clearly different from the right one."
+    ),
+    "medium": (
+        "Difficulty: MEDIUM. Mix recall questions with questions that need understanding of how or why. The wrong "
+        "options should be plausible but still distinguishable."
+    ),
+    "hard": (
+        "Difficulty: HARD. At least half of the questions must be reasoning questions of these kinds: \"Why ...?\", "
+        "\"How does X differ from Y?\", \"Which of these is NOT ...?\" or \"What would happen if ...?\". Do not write "
+        "plain \"What is X?\" questions. Every wrong option must be plausible: similar in length and wording to the "
+        "right one and based on related ideas in the context."
+    ),
+}
+
+
+KEY_MIN_SUPPORT = 0.5        # share of the keyed answer's content words that must appear in the slide it cites
+NOT_OTHERS_SUPPORT = 0.6     # in a "which is NOT ..." question, the three wrong options must be backed this much
+_NOT_QUESTION = re.compile(r"\bNOT\b|\bEXCEPT\b")
+
+
+def key_is_backed(question: Dict[str, Any], chunk_text: str) -> bool:
+    """
+    Is the keyed answer backed by the slide the question cites? A small model sometimes keys an answer the slide never
+    says, and the harder the question, the more often. Checked by word overlap, so it is a screen, not a proof.
+
+    A normal question is kept if most content words of the keyed option appear in the cited text. A "which is NOT ..."
+    question is the reverse: the keyed option must be the one the text does NOT back, and the other three must be backed
+    (a real case: a "NOT a benefit" question whose four options were all listed as benefits on the slide).
+    """
+    stems = _stems(chunk_text)
+    scores = [support(option, stems) for option in question["options"]]
+    keyed = question["answer_index"]
+    if _NOT_QUESTION.search(question["question"]):
+        others = [s for i, s in enumerate(scores) if i != keyed]
+        return scores[keyed] < KEY_MIN_SUPPORT and sum(others) / len(others) >= NOT_OTHERS_SUPPORT
+    return scores[keyed] >= KEY_MIN_SUPPORT
+
+
+def normalise_level(level: Optional[str]) -> str:
+    """A valid difficulty from whatever was passed in (anything unknown becomes the default)."""
+    level = (level or "").strip().lower()
+    return level if level in DIFFICULTIES else DEFAULT_DIFFICULTY
 
 
 def parse_quiz_json(raw: str, n_chunks: int) -> List[Dict[str, Any]]:
@@ -164,12 +219,22 @@ def _definitions(chunks) -> List[Dict[str, Any]]:
     return found
 
 
-def _definition_question(item, others, rng) -> Optional[Dict[str, Any]]:
+def _overlap(a: str, b: str) -> float:
+    """Share of content words (4+ letters) that two texts have in common, 0 to 1."""
+    wa, wb = set(re.findall(r"[a-z]{4,}", a.lower())), set(re.findall(r"[a-z]{4,}", b.lower()))
+    return len(wa & wb) / len(wa | wb) if wa and wb else 0.0
+
+
+def _definition_question(item, others, rng, close: bool = False) -> Optional[Dict[str, Any]]:
     wrong = [o for o in others if o["term"] != item["term"] and o["rest"] != item["rest"]]
     if len(wrong) < 3:
         return None
-    # Prefer wrong options of similar length so the right one is not given away by its size.
-    wrong.sort(key=lambda o: abs(len(o["rest"]) - len(item["rest"])) + rng.random() * 40)
+    if close:
+        # Hard: wrong options that share the most wording with the right one are the hardest to rule out.
+        wrong.sort(key=lambda o: (-_overlap(o["rest"], item["rest"]), abs(len(o["rest"]) - len(item["rest"])), rng.random()))
+    else:
+        # Prefer wrong options of similar length so the right one is not given away by its size.
+        wrong.sort(key=lambda o: abs(len(o["rest"]) - len(item["rest"])) + rng.random() * 40)
     verb = item["verb"]
     stem = {"is": f"What is {item['term']}?", "are": f"What are {item['term']}?",
             "refers to": f"What does {item['term']} refer to?", "means": f"What does {item['term']} mean?"}[verb]
@@ -207,7 +272,7 @@ def _cloze_question(chunk_index, doc, frequency, rng) -> Optional[Dict[str, Any]
 
 def fallback_questions_from_chunks(
     chunks, n_questions: int, rng: Optional[random.Random] = None, avoid=(),
-    priority: int = 0, n_priority: int = 3,
+    priority: int = 0, n_priority: int = 3, close: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Source-grounded questions written without the LLM: "What is X?" from definitions in the
@@ -248,7 +313,7 @@ def fallback_questions_from_chunks(
             used.add(chunk_index)
             question = None
             if chunk_index in by_chunk:
-                question = _definition_question(by_chunk[chunk_index], definitions, rng)
+                question = _definition_question(by_chunk[chunk_index], definitions, rng, close)
             if question is None:
                 question = _cloze_question(chunk_index, chunks[chunk_index - 1], frequency, rng)
             if question and question["question"] not in {q["question"] for q in questions} | avoid:
@@ -293,15 +358,30 @@ def _abbreviation_questions(chunks, rng, count: int = 4) -> List[Dict[str, Any]]
     return out
 
 
-def _heading_questions(headings, rng) -> List[Dict[str, Any]]:
-    """Questions that use the material's headings: pick the true statement, or name the topic of a statement."""
+_GLUED_CAPITALS = re.compile(r"[A-Z]{2,}[A-Z][a-z]")       # "MODELAnnual", "XXPresentation": two headings run together
+_GLUED_NUMBER = re.compile(r"[A-Za-z]\d{2,}")                # "title108": a page number run onto a word
+
+
+def _garbled_heading(heading: str) -> bool:
+    """A slide title that PDF extraction ran together with its neighbours or a page number: not fit to use as an answer option."""
+    return bool(_GLUED_CAPITALS.search(heading) or _GLUED_NUMBER.search(heading))
+
+
+def _heading_questions(headings, rng, close: bool = False) -> List[Dict[str, Any]]:
+    """
+    Questions that use the material's headings: pick the true statement, or name the topic of a statement.
+    With `close`, the wrong statements are the ones most like the right one (from the most related other
+    slides), which makes them harder to rule out. They are still taken from OTHER headings, so none is true of this one.
+    """
     if len(headings) < 4:
         return []
 
     def words(text):
         return {w for w in re.findall(r"[a-z]{4,}", text.lower())}
 
-    usable = [h for h in headings if len(h["heading"]) <= 60]
+    usable = [h for h in headings if len(h["heading"]) <= 60 and not _garbled_heading(h["heading"])]
+    if len(usable) < 4:
+        return []
     out = []
     for h in usable:
         good = [x for x in h["sentences"] if 50 <= len(x) <= 170 and not x.startswith(("Example", "For example"))]
@@ -315,6 +395,8 @@ def _heading_questions(headings, rng) -> List[Dict[str, Any]]:
             if 50 <= len(x) <= 170 and not x.startswith(("Example", "For example")) and not (words(title) & words(x))
         ]
         rng.shuffle(pool)
+        if close:
+            pool.sort(key=lambda item: -_overlap(item[1], correct))   # stable: ties keep their random order
         wrong, seen_headings = [], set()
         for o, x in pool:
             if o["heading"] not in seen_headings and x != correct:
@@ -342,24 +424,39 @@ def _heading_questions(headings, rng) -> List[Dict[str, Any]]:
     return out
 
 
+# Which question types a quiz leans on, by difficulty, when it is written without the model. Recognition questions
+# (what is X, what does X stand for, which topic) come first for Easy; true-statement questions, which need the
+# student to rule out look-alike statements, come first for Hard, with the most confusable wrong options.
+_KINDS_BY_LEVEL = {
+    "easy": ["def", "abbr", "topic"],
+    "medium": ["def", "abbr", "statement", "topic"],
+    "hard": ["statement", "def", "abbr"],
+}
+_ALL_KINDS = ["def", "abbr", "statement", "topic"]
+
+
 def mixed_fallback_quiz(
     chunks, headings, n_questions: int, rng: random.Random, avoid=(), focus: Optional[str] = None,
-    priority: int = 0, n_focus: int = 3,
+    priority: int = 0, n_focus: int = 3, level: str = DEFAULT_DIFFICULTY,
 ) -> List[Dict[str, Any]]:
     """
     A quiz written without the LLM that mixes question types: definitions, abbreviations, true-statement
     and which-topic questions, with fill-in-the-blank only to fill gaps. With `focus`, up to `n_focus`
-    questions come from that topic first.
+    questions come from that topic first. `level` shifts the mix and, for "hard", the wrong options.
     """
     avoid = set(avoid)
-    base = fallback_questions_from_chunks(chunks, n_questions * 3, rng, avoid, priority, n_priority=n_focus * 2)
+    level = normalise_level(level)
+    close = level == "hard"
+    base = fallback_questions_from_chunks(
+        chunks, n_questions * 3, rng, avoid, priority, n_priority=n_focus * 2, close=close
+    )
     pools: Dict[str, List[Dict[str, Any]]] = {
         "def": [q for q in base if not q["question"].startswith("Fill in the blank")],
         "abbr": _abbreviation_questions(chunks, rng),
         "statement": [], "topic": [],
         "cloze": [q for q in base if q["question"].startswith("Fill in the blank")],
     }
-    for q in _heading_questions(headings, rng):
+    for q in _heading_questions(headings, rng, close=close):
         pools[q["kind"]].append(q)
     for kind, pool in pools.items():
         pool[:] = [q for q in pool if q["question"] not in avoid]
@@ -374,7 +471,7 @@ def mixed_fallback_quiz(
     for pool in pools.values():
         pool.sort(key=lambda q: not on_focus(q))  # stable: focus questions first, the rest keep their random order
 
-    kinds = ["def", "abbr", "statement", "topic"]
+    kinds = list(_KINDS_BY_LEVEL[level])
     rng.shuffle(kinds)
     picked: List[Dict[str, Any]] = []
 
@@ -391,9 +488,19 @@ def mixed_fallback_quiz(
     if focus:
         take(kinds, True, n_focus)
     take(kinds, False, n_questions)
+    take([k for k in _ALL_KINDS if k not in kinds], False, n_questions)  # the other types, if these ran out
     take(["cloze"], False, n_questions)  # only if the other types could not fill the quiz
     rng.shuffle(picked)
     return picked
+
+
+def _source_of(doc) -> Dict[str, Any]:
+    """Where a question came from, so a student or professor can check it against the slide."""
+    return {
+        "file": doc.metadata.get("source", "unknown").replace("\\", "/").split("/")[-1],
+        "page": (doc.metadata.get("page") or 0) + 1,
+        "slide": topic_title(doc.metadata),
+    }
 
 
 def _sample_in_order(chunks: list, count: int, rng: random.Random) -> list:
@@ -426,7 +533,7 @@ class QuizGenerator(Agent):
         chunks = retrieval.chunks
         topic = topic or topic_title(chunks[0].metadata)
         chain = _PROMPT | (ctx.llm if ctx.llm is not None else get_json_llm()) | StrOutputParser()
-        variables = {"n": n_questions, "topic": topic, "context": format_context(chunks), "focus_note": ""}
+        variables = {"n": n_questions, "topic": topic, "context": format_context(chunks), "focus_note": "", "level_note": ""}
 
         questions: List[Dict[str, Any]] = []
         try:
@@ -475,13 +582,19 @@ class QuizGenerator(Agent):
         topic: str = "Selected material",
         avoid=(),
         focus: Optional[str] = None,
+        difficulty: str = DEFAULT_DIFFICULTY,
         **_,
     ) -> AgentResult:
         """Write a quiz directly from the selected document chunks, not a named topic.
 
-        Chunks are sampled at random, and any question text in `avoid` (e.g. from the previous quiz)
-        is not repeated, so every call gives a different quiz.
+        `n_questions` (1 to 15) is how many to write and `difficulty` (easy, medium or hard) is the writer's
+        intent: the model is told what kind of questions to ask, and the rule-based fallback leans on easier or
+        harder question types. A request for more than the local model writes in one reply is made in batches
+        of BATCH, each from a fresh sample of the material. Chunks are sampled at random, and any question text
+        in `avoid` (e.g. from the previous quiz) is not repeated, so every call gives a different quiz.
         """
+        level = normalise_level(difficulty)
+        n_questions = max(MIN_QUESTIONS, min(int(n_questions), MAX_QUESTIONS))
         selected = set(ctx.source_filenames or [])
         chunks = []
         for doc in ctx.vectorstore.docstore._dict.values():
@@ -501,36 +614,57 @@ class QuizGenerator(Agent):
             focus_chunks = [d for d in hit.chunks if any(d is c for c in all_chunks)] if hit.relevant else []
             topic = focus
         others = [c for c in all_chunks if not any(c is f for f in focus_chunks)]
-        chunks = focus_chunks + _sample_in_order(others, n_questions + 3 - len(focus_chunks), rng)
 
-        if not chunks:
+        if not (focus_chunks or others):
             return AgentResult(
                 agent=self.name, kind="quiz", text=NOT_COVERED_MESSAGE, grounded=False,
                 data={"error": "not_covered"},
             )
 
         chain = _PROMPT | (ctx.llm if ctx.llm is not None else get_json_llm()) | StrOutputParser()
-        variables = {
-            "n": n_questions, "topic": topic, "context": format_context(chunks),
-            "focus_note": "At least 3 of the questions must be about this topic; the others may cover other parts of the context."
-            if focus_chunks else "",
-        }
+        known = set(avoid)
         questions: List[Dict[str, Any]] = []
-        try:
-            for _attempt in range(2):
-                questions = [
-                    q for q in parse_quiz_json(chain.invoke(variables), n_chunks=len(chunks))
-                    if q["question"] not in set(avoid)
-                ]
-                if questions:
-                    break
-        except Exception:
-            questions = []
-        if not questions:  # the model is offline or gave nothing usable
-            chunks = focus_chunks + others
-            questions = mixed_fallback_quiz(
-                chunks, major_headings(ctx), n_questions, rng, avoid, focus=focus, priority=len(focus_chunks),
+        from_model = 0
+        discarded = 0                                               # model questions whose keyed answer the slide does not back
+        empty_replies = 0
+        for _call in range(-(-n_questions // BATCH) + 1):          # one spare call: models fail JSON now and then
+            need = n_questions - len(questions)
+            if need <= 0 or empty_replies >= 2:
+                break
+            take = min(BATCH, need)
+            batch = focus_chunks + _sample_in_order(others, max(take + 3 - len(focus_chunks), 0), rng)
+            variables = {
+                "n": take, "topic": topic, "context": format_context(batch),
+                "focus_note": "At least 3 of the questions must be about this topic; the others may cover other parts of the context."
+                if focus_chunks else "",
+                "level_note": LEVEL_NOTES[level],
+            }
+            try:
+                parsed = parse_quiz_json(chain.invoke(variables), n_chunks=len(batch))
+            except Exception:
+                break                                               # the model is offline: stop asking it
+            new = [q for q in parsed if q["question"] not in known]
+            fresh = [q for q in new if key_is_backed(q, batch[q["chunk"] - 1].page_content)]
+            discarded += len(new) - len(fresh)
+            known.update(q["question"] for q in new)                # a rejected question is not retried or counted twice
+            if not fresh:
+                empty_replies += 1
+                continue
+            for q in fresh[:take]:
+                q["source"] = _source_of(batch[q["chunk"] - 1])
+                questions.append(q)
+                from_model += 1
+
+        if len(questions) < n_questions:                            # the model is offline or fell short: top up
+            pool = focus_chunks + others
+            extra = mixed_fallback_quiz(
+                pool, major_headings(ctx), n_questions - len(questions), rng, known, focus=focus,
+                priority=len(focus_chunks), level=level,
             )
+            for q in extra:
+                if not q.get("source"):
+                    q["source"] = _source_of(pool[q["chunk"] - 1])
+                questions.append(q)
         if not questions:
             return AgentResult(
                 agent=self.name, kind="quiz", grounded=False,
@@ -541,24 +675,23 @@ class QuizGenerator(Agent):
         saved = []
         for question in questions[:n_questions]:
             question = shuffle_options({k: v for k, v in question.items() if not k.startswith("_")}, rng)
-            if not question.get("source"):
-                doc = chunks[question["chunk"] - 1]
-                question["source"] = {
-                    "file": doc.metadata.get("source", "unknown").replace("\\", "/").split("/")[-1],
-                    "page": (doc.metadata.get("page") or 0) + 1,
-                    "slide": topic_title(doc.metadata),
-                }
             question.pop("kind", None)
+            question["level"] = level
             saved.append(question)
 
         quiz_id = create_quiz(
-            topic=topic, prompt=f"Quiz on {topic}" if focus_chunks else f"Quiz from {topic}", questions=saved, scope=scope,
-            owner=ctx.student_id, db_dir=ctx.db_dir,
+            topic=topic,
+            prompt=(f"Quiz on {topic}" if focus_chunks else f"Quiz from {topic}") + f" ({level})",
+            questions=saved, scope=scope, owner=ctx.student_id, db_dir=ctx.db_dir,
         )
         return AgentResult(
             agent=self.name,
             kind="quiz",
-            text=f"{len(saved)}-question quiz from {topic}.",
-            sources=chunks,
-            data={"quiz_id": quiz_id, "topic": topic, "questions": saved, "scope": scope},
+            text=f"{len(saved)}-question {level} quiz from {topic}.",
+            sources=focus_chunks + others,
+            data={
+                "quiz_id": quiz_id, "topic": topic, "questions": saved, "scope": scope,
+                "difficulty": level, "requested": n_questions, "written": len(saved), "from_model": from_model,
+                "discarded": discarded,
+            },
         )

@@ -12,14 +12,83 @@ best-effort `section` title (the page's first substantial line) so
 retrieved chunks can be cited by slide/section, not just page number.
 """
 
+import hashlib
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFLoader
+from pypdf import PdfReader
 
 from rag_core.config import DATA_DIR
 from rag_core.normalize import normalize_page_text, page_heading
+
+MIN_READABLE_CHARACTERS = 40   # a PDF with fewer characters of text than this has nothing to study from
+IMAGE_COUNT_PAGES = 10         # how many pages are looked at when counting the pictures in an unreadable PDF
+
+
+@dataclass(frozen=True)
+class PdfStatus:
+    """Whether a PDF has text the app can read, and if not, what is in it instead."""
+
+    pages: int
+    characters: int       # characters of text found (stops counting once the PDF is clearly readable)
+    images: int           # pictures on the pages, counted only when no text was found
+    readable: bool
+
+
+def inspect_pdf(file_path: str | Path) -> PdfStatus:
+    """
+    Check a PDF for text without loading it into the index.
+
+    A scanned PDF, or one made only of pictures (diagrams, screenshots), has no text layer, so nothing can be
+    indexed from it however often the library is updated. The app has no OCR; this tells the user so, instead of
+    leaving the file looking as if it only "needs an update".
+    """
+    try:
+        reader = PdfReader(str(file_path))
+        pages = list(reader.pages)
+    except Exception:  # corrupt, password-protected, or not a PDF at all
+        return PdfStatus(0, 0, 0, False)
+    characters = 0
+    for page in pages:
+        try:
+            characters += len((page.extract_text() or "").strip())
+        except Exception:
+            continue
+        if characters >= MIN_READABLE_CHARACTERS:
+            return PdfStatus(len(pages), characters, 0, True)
+    # Count DISTINCT pictures on the first few pages: slide templates often share the same images across pages,
+    # and a long scan should not be unpacked in full just to describe it.
+    distinct = set()
+    for page in pages[:IMAGE_COUNT_PAGES]:
+        try:
+            distinct.update(hashlib.md5(image.data).hexdigest() for image in page.images)
+        except Exception:
+            continue
+    return PdfStatus(len(pages), characters, len(distinct), False)
+
+
+def unreadable_pdfs(data_dir: str | Path = DATA_DIR) -> Dict[str, PdfStatus]:
+    """The PDFs in `data_dir` that have no readable text, by file name."""
+    found = {}
+    for path in sorted(Path(data_dir).glob("*.pdf")):
+        status = inspect_pdf(path)
+        if not status.readable:
+            found[path.name] = status
+    return found
+
+
+def describe_unreadable(status: PdfStatus) -> str:
+    """One plain sentence on why a PDF cannot be used, for the library page."""
+    if status.pages == 0:
+        return "This file could not be opened as a PDF (it may be damaged or password-protected)."
+    pictures = f" and {status.images} picture(s)" if status.images else ""
+    return (
+        f"No readable text: this PDF has {status.pages} page(s){pictures} but no text layer, so it is a scan or "
+        "made of images. Updating the library cannot fix that. Use a text version of these notes instead."
+    )
 
 
 def load_pdf(file_path: str | Path) -> List[Document]:

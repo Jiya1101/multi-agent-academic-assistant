@@ -28,6 +28,7 @@ class AgentContext:
     student_id: Optional[str] = None            # None = anonymous
     session_id: Optional[str] = None            # random token for one browsing session (links follow-ups)
     source_filenames: Optional[Sequence[str]] = None  # None = search all files
+    history: Sequence[Any] = ()                 # the conversation so far: Turn objects, oldest first (agents/conversation.py)
     llm: Any = None                             # chat-model override (used by tests)
     embeddings: Any = None                      # embedding-model override
 

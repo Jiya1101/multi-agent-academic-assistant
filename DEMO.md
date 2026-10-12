@@ -160,6 +160,6 @@ running cost, works offline.
 - Quiz questions are written by a local 8B model. They are validated and
   traceable to a slide, but in testing some had weak distractors and one had
   two defensible answers, so a professor should review them.
-- Llama 3 on CPU takes about a minute per answer and 2 to 3 minutes per quiz. A GPU would make
+- Llama 3 on CPU takes about a minute per answer and 3 to 6 minutes for every 5 quiz questions. A GPU would make
   it near instant.
 - Not tested with real students or professors yet.

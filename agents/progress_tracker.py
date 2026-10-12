@@ -26,6 +26,7 @@ from rag_core.query_log import list_queries
 
 STRONG_AT = 0.8      # quiz accuracy at or above this = Strong
 DEVELOPING_AT = 0.5  # at or above this (but below STRONG_AT) = Developing
+RECENT_QUIZZES = 3   # how many of a student's latest quizzes decide their suggested difficulty
 
 # Higher = study this first. "Strong" never gets recommended.
 _PRIORITY = {"Weak": 3, "Needs practice": 2, "Developing": 1, "Not yet tested": 0.5, "Strong": 0}
@@ -221,6 +222,26 @@ class ProgressTracker(Agent):
                 advice = "No activity on this material yet."
             out.append({"file": file, "topics": cards, "quizzes": m["quizzes"], "advice": advice})
         return out
+
+    def suggested_difficulty(self, ctx: AgentContext) -> tuple:
+        """
+        A quiz difficulty for this student from how they did on their last few quizzes: (level, reason).
+
+        Scores at or above STRONG_AT get a hard quiz, below DEVELOPING_AT an easy one, in between medium (the same
+        cut-offs as Strong and Weak elsewhere). With no identified student or no quiz yet there is nothing to go on,
+        so it starts at medium and says so. A rule of thumb, not a calibrated placement.
+        """
+        attempts = list_attempts(ctx.student_id, ctx.db_dir)[-RECENT_QUIZZES:] if ctx.student_id else []
+        total = sum(a["total"] for a in attempts)
+        if not total:
+            return "medium", "You have no quiz history yet, so this starts at medium."
+        accuracy = sum(a["correct"] for a in attempts) / total
+        basis = f"you got {accuracy:.0%} on your last {len(attempts)} quiz(zes)"
+        if accuracy >= STRONG_AT:
+            return "hard", f"Hard, because {basis}."
+        if accuracy < DEVELOPING_AT:
+            return "easy", f"Easy, because {basis}."
+        return "medium", f"Medium, because {basis}."
 
     def record_attempt(
         self, quiz: Dict[str, Any], answers: List[Optional[int]], ctx: AgentContext

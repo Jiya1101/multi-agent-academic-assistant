@@ -6,6 +6,8 @@ its own outcome (answered or not covered), which is the raw material the
 Faculty Insight and Gap Handler agents work from.
 """
 
+from typing import Optional
+
 from agents.base import Agent, AgentContext, AgentResult
 from rag_core.chain import answer_question
 from rag_core.query_log import log_query
@@ -15,7 +17,10 @@ class DoubtResolver(Agent):
     name = "Doubt Resolver"
     job = "Answer a question from the notes, with citations, or say the notes do not cover it."
 
-    def run(self, request: str, ctx: AgentContext, **_) -> AgentResult:
+    def run(
+        self, request: str, ctx: AgentContext, original: Optional[str] = None, follow_up_of: Optional[int] = None, **_
+    ) -> AgentResult:
+        """`original` / `follow_up_of`: set when `request` is a follow-up that was rewritten (see agents/conversation.py)."""
         result = answer_question(
             request,
             ctx.vectorstore,
@@ -32,6 +37,8 @@ class DoubtResolver(Agent):
             student_id=ctx.student_id,
             agent=self.name,
             session_id=ctx.session_id,
+            original_question=original,
+            follow_up_of=follow_up_of,
         )
         return AgentResult(
             agent=self.name,

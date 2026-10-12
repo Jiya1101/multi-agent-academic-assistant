@@ -6,6 +6,8 @@ explanation wants a structured walk-through. Same retrieval and relevance
 gate, so it still refuses to explain anything the notes do not contain.
 """
 
+from typing import Optional
+
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -58,6 +60,8 @@ class ConceptExplainer(Agent):
         ctx: AgentContext,
         level: str = "beginner",
         log: bool = True,
+        original: Optional[str] = None,
+        follow_up_of: Optional[int] = None,
         **_,
     ) -> AgentResult:
         retrieval = retrieve(request, ctx.vectorstore, source_filenames=ctx.source_filenames)
@@ -102,6 +106,8 @@ class ConceptExplainer(Agent):
                 student_id=ctx.student_id,
                 agent=self.name,
                 session_id=ctx.session_id,
+                original_question=original,
+                follow_up_of=follow_up_of,
             )
         return AgentResult(
             agent=self.name,

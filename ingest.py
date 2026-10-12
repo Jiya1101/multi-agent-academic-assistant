@@ -15,7 +15,7 @@ import argparse
 import sys
 
 from rag_core.config import DATA_DIR, DB_DIR
-from rag_core.loader import load_all_pdfs
+from rag_core.loader import describe_unreadable, load_all_pdfs, unreadable_pdfs
 from rag_core.splitter import split_documents
 from rag_core.embeddings import get_embeddings
 from rag_core.advice_log import approved_clarifications
@@ -36,6 +36,8 @@ def main() -> None:
         print(f"No PDF files found in '{args.data_dir}'. Add some notes and re-run.")
         sys.exit(1)
     print(f"      Loaded {len(documents)} page(s).")
+    for name, status in unreadable_pdfs(args.data_dir).items():
+        print(f"      WARNING: {name} was left out. {describe_unreadable(status)}")
 
     # 2. Chunk documents for embedding.
     print("[2/4] Splitting documents into chunks ...")

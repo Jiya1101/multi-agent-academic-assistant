@@ -9,6 +9,7 @@ on the shared retrieval layer in `rag_core`.
 from agents.base import Agent, AgentContext, AgentResult
 from agents.concept_explainer import ConceptExplainer
 from agents.content_advisor import ContentAdvisor
+from agents.conversation import FollowUp, Turn, remember, resolve_follow_up, turn_from
 from agents.doubt_resolver import DoubtResolver
 from agents.faculty_insight import ConfusionTopic, FacultyInsight
 from agents.gap_handler import GapHandler
@@ -23,7 +24,7 @@ __all__ = [
     "Agent", "AgentContext", "AgentResult",
     "ConceptExplainer", "DoubtResolver", "FacultyInsight", "ConfusionTopic",
     "GapHandler", "ProgressTracker", "TopicProgress", "QuizGenerator", "grade_answers", "NoteGenerator",
-    "OralAssessor", "ContentAdvisor",
+    "OralAssessor", "ContentAdvisor", "Turn", "FollowUp", "remember", "resolve_follow_up", "turn_from",
     "Orchestrator", "OrchestratorResult", "Route", "route_message",
     "HybridRouter", "LearnedRouter", "RuleRouter",
 ]

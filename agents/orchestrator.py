@@ -17,11 +17,12 @@ Hand-offs implemented here (each is recorded in the returned `trace`):
 """
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from agents.base import AgentContext, AgentResult
 from agents.concept_explainer import ConceptExplainer
 from agents.content_advisor import ContentAdvisor
+from agents.conversation import resolve_follow_up
 from agents.doubt_resolver import DoubtResolver
 from agents.faculty_insight import FacultyInsight
 from agents.gap_handler import GapHandler
@@ -39,6 +40,7 @@ class OrchestratorResult:
     results: List[AgentResult]
     trace: List[str]
     message: str = ""
+    understood_as: Optional[str] = None     # the standalone question a follow-up was rewritten into, if it was
 
     @property
     def primary(self) -> AgentResult:
@@ -65,28 +67,38 @@ class Orchestrator:
     # Student requests                                                   #
     # ------------------------------------------------------------------ #
     def handle(self, message: str, ctx: AgentContext) -> OrchestratorResult:
-        route = self.router.route(message, ctx.db_dir)
+        # A follow-up ("what about its disadvantages?") is first turned into a standalone question using the
+        # conversation so far; everything after this point (routing, answering, logging) uses that text.
+        follow = resolve_follow_up(message, ctx)
+        text = follow.text
+        rewritten = follow.how != "none"
+        link = {"original": message, "follow_up_of": follow.previous.log_id} if rewritten else {}
+
+        route = self.router.route(text, ctx.db_dir)
         how = route.source if route.confidence is None else f"{route.source}, {route.confidence:.0%} sure"
         trace = [f"Router -> {route.name} ({how}): {route.reason}"]
+        if rewritten:
+            by = "rewritten by the model" if follow.how == "model" else "joined with the topic of your last answer"
+            trace.insert(0, f"Follow-up: understood as \"{text}\" ({by})")
         results: List[AgentResult] = []
 
         if route.name == "doubt":
-            results.append(self.doubt_resolver.run(message, ctx))
+            results.append(self.doubt_resolver.run(text, ctx, **link))
         elif route.name == "explain":
-            results.append(self.concept_explainer.run(message, ctx, level=route.params["level"]))
+            results.append(self.concept_explainer.run(text, ctx, level=route.params["level"], **link))
         elif route.name == "notes":
             topics = route.params.get("topics") or []
             if topics:
-                results.append(self.note_generator.run(message, ctx, topics=topics))
+                results.append(self.note_generator.run(text, ctx, topics=topics))
             else:
                 results.append(AgentResult(
                     agent="Orchestrator", kind="clarify", grounded=False,
                     text="Which topic? For example: 'make notes on ACID and BASE'.",
                 ))
         elif route.name == "progress":
-            results.append(self.progress_tracker.run(message, ctx))
+            results.append(self.progress_tracker.run(text, ctx))
         elif route.name == "quiz":
-            self._quiz(route, message, ctx, results, trace)
+            self._quiz(route, text, ctx, results, trace)
         elif route.name == "study_next":
             self._study_next(ctx, results, trace)
 
@@ -95,9 +107,9 @@ class Orchestrator:
         if last and last.kind in ("answer", "explanation", "notes") and not last.grounded:
             trace.append(f"{last.agent} -> Gap Handler: the notes do not cover this")
             results.append(
-                self.gap_handler.run(message, ctx, log_id=last.data.get("log_id"))
+                self.gap_handler.run(text, ctx, log_id=last.data.get("log_id"))
             )
-        return OrchestratorResult(route, results, trace, message)
+        return OrchestratorResult(route, results, trace, message, understood_as=text if rewritten else None)
 
     def _quiz(self, route, message, ctx, results, trace) -> None:
         topic = route.params["topic"]

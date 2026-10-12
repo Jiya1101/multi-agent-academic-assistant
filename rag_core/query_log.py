@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS queries (
     student_id        TEXT,
     agent             TEXT,
     session_id        TEXT,
-    follow_up_of      INTEGER
+    follow_up_of      INTEGER,
+    original_question TEXT
 )
 """
 
@@ -53,6 +54,7 @@ _ADDED_COLUMNS = {
     "agent": "TEXT",           # which agent handled it (Doubt Resolver, Concept Explainer, ...)
     "session_id": "TEXT",      # random per-browser-session token, not tied to a person
     "follow_up_of": "INTEGER", # id of the earlier question this one came back to
+    "original_question": "TEXT",  # what the student typed, when it was rewritten into a standalone question
 }
 
 
@@ -139,6 +141,8 @@ def log_query(
     session_id: Optional[str] = None,
     asked_at: Optional[str] = None,
     window_minutes: float = FOLLOW_UP_WINDOW_MINUTES,
+    original_question: Optional[str] = None,
+    follow_up_of: Optional[int] = None,
 ) -> int:
     """
     Record one question and its outcome. Returns the new row id.
@@ -147,16 +151,22 @@ def log_query(
     plain questions). `session_id` groups one browsing session, which lets a
     return to the same topic be recorded as a follow-up even for an anonymous
     student. `asked_at` (ISO, UTC) is only for tests and demo seeding.
+
+    A follow-up typed in a conversation ("what about its disadvantages?") is rewritten into a standalone
+    question before it is answered, so `question` holds the standalone text (which is what the professor's
+    grouping needs) and `original_question` what the student typed. When the conversation already knows which
+    earlier question this follows, it is passed as `follow_up_of`; otherwise it is guessed from the topic.
     """
     retrieved = [_describe_chunk(d) for d in source_documents]
     status = STATUS_ANSWERED if grounded else STATUS_GAP
     asked_at = asked_at or _now()
     with closing(_connect(db_dir)) as conn, conn:
-        follow_up_of = _find_follow_up(conn, session_id, retrieved, asked_at, window_minutes)
+        if follow_up_of is None:
+            follow_up_of = _find_follow_up(conn, session_id, retrieved, asked_at, window_minutes)
         cursor = conn.execute(
             "INSERT INTO queries (asked_at, question, grounded, top_score, "
-            "retrieved, scope, status, student_id, agent, session_id, follow_up_of) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "retrieved, scope, status, student_id, agent, session_id, follow_up_of, original_question) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 asked_at,
                 question,
@@ -169,6 +179,7 @@ def log_query(
                 agent,
                 session_id,
                 follow_up_of,
+                original_question,
             ),
         )
         return int(cursor.lastrowid)
